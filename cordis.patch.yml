@@ -9,5 +9,5 @@
 # delegating the durable mutation to the `compaction` service.
 
 - insert:
-    - id: force-compact
+    - id: falling-ts-force-compact
       name: '@falling-ts/dsh-force-compact'

@@ -7,7 +7,7 @@
  * 的两个面：宿主半部由 main 入口加载，本文件由 exports["./client"] 导出，经
  * dsh.client 声明被 client module 系统自动组成并服务（/plugins/<id>/client.js）。
  *
- * 该分区通过 settingsScope 读写宿主侧 falling-ts-force-compact 设置命名空间
+ * 该分区通过 configForms 读写宿主侧 falling-ts-force-compact 设置命名空间
  * （disableThinking / autoThresholdTokens / retainLatestTokens /
  * turnEndForceCompactionEnabled），并在设置页左侧菜单注册 "强制压缩" 分区。
  * 纯展示 + 写回，不引入 timer、内存态存储或额外订阅。
@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
     const React = require("react");
     const h = React.createElement;
-    // 基线外部（web 平台预载）：把 settingsScope 镜像成 uSES 安全的 SnapshotStore。
+    // 基线外部（web 平台预载）：把 configForms 镜像成 uSES 安全的 SnapshotStore。
     // `createSnapshotStore` 的正确来源是 PLATFORM_MODULES seed 表内的静态包
     // `@deepseek-ai/dsh-client-store`；`@deepseek-ai/dsh-client-runtime` 不在共享模块表
     // 里，require 它会命中 client-modules 的 "missed the module table" 落空错误。
@@ -247,8 +247,8 @@ window.__ModuleLoader__.load({
       badgeWorking19: "거의 다 됐습니다(아마도)...",
     };
 
-    /** 必需服务（cordis fiber inject）。settingsScope 由 ui-settings 提供。 */
-    const inject = ["slots", "locale", "settingsScope"];
+    /** 必需服务（cordis fiber inject）。configForms 由 ui-settings 提供。 */
+    const inject = ["slots", "locale", "configForms"];
 
     // ── 视觉设计 ----------------------------------------------------------------
     // 参照通用设置分区（如「语言」）的排版：扁平、无背景色、行间细分隔线、
@@ -782,7 +782,7 @@ window.__ModuleLoader__.load({
      * （这正是文档 turn-status-deep-diving-rendering.md §四「临时改文案」描述的
      * 机制），而下一轮 liveUi 变化又会再次贴上来——净效果就是跟随宿主相位持续
      * 显示,无需本地 timer、也无需 MutationObserver 追帧：宿主每次改写都经由
-     * settingsScope 镜像到达这里,天然成为我们的"事件时钟"。
+     * configForms 镜像到达这里,天然成为我们的"事件时钟"。
      *
      * 定位策略：全页面可能存在多个 role=status 节点（多标签/多会话并存时,每个
      * 打开的 running 会话各有一个 TurnStatus）。我们取**全部**命中的节点逐一贴
@@ -1052,12 +1052,15 @@ window.__ModuleLoader__.load({
         return () => { disposeDicts(); disposeLanguages(); };
       }, "force-compact: dictionaries and languages");
       const t = ctx.locale.bind(NS);
-      const scope = ctx.settingsScope.bind({ namespace: NS_SETTINGS });
+      // ui-settings 的 configForms 服务按命名空间交出 ConfigForm（getSnapshot/subscribe
+      // 与旧 settingsScope 同形；status 枚举为 'loading'|'ready'|'unavailable'，set/unset/
+      // mutate 现在回答 Promise<boolean>）。
+      const scope = ctx.configForms.get(NS_SETTINGS);
       // 挂载 swish 调色板样式表（首次 apply 时执行一次；effect 登记便于 fiber 卸载时清理）。
       ctx.effect(() => ensureSwishStylesheetInlined(), "force-compact: swish stylesheets");
       // 主题别名（浅色/暗色两套取值）。注入失败只影响取色、不影响功能。
       ctx.effect(() => ensureThemeTokensInlined(), "force-compact: theme tokens");
-      // 把 settingsScope 镜像成 uSES 安全的 SnapshotStore（hooks 分区的可观察源）。
+      // 把 configForms 镜像成 uSES 安全的 SnapshotStore（hooks 分区的可观察源）。
       const store = createSnapshotStore({ status: "loading", value: undefined, writable: false });
       const derive = () => {
         // SAFETY ENVELOPE: derive runs BOTH as a direct call and as the
@@ -1086,15 +1089,15 @@ window.__ModuleLoader__.load({
           // Never let a cosmetic derive take down the settings panel.
         }
       };
-      // 关键：settingsScope 的快照自带权威状态枚举 'loading'|'ready'|'unavailable'
-      // （见 ui-settings 的 SettingsScopeController.derive：命名空间未出现时置
+      // 关键：configForms 的快照自带权威状态枚举 'loading'|'ready'|'unavailable'
+      // （见 ui-settings 的 ConfigFormController.derive：命名空间未出现时置
       // 'unavailable'，并非 'loading'）。derive 直接透传该枚举，绝不按 mode 二次
       // 映射——否则会把这个 loopback 实例上 mode='host' 的 'unavailable' 误判为
       // 'loading'，让面板在命名空间未被宿主注册期间永久停留在“加载中…”。
       //
       // 宿主侧 settings 命名空间是惰性安装的（插件 apply 时一次性尽力注册；若彼时
       // settings 服务尚未挂载，则由首个 agent/* 事件补装）。一旦命名空间真正出现，
-      // 客户端 settingsScope 背后共享的 SettingsDescribeMirror 会收到 settings/
+      // 客户端 configForms 背后共享的 SettingsDescribeMirror 会收到 settings/
       // document-updated 广播并重新 mirror.load()，随后 derive() 读到 status='ready'
       // 自动渲染出对齐好的表单——无需本分区额外维护 timer 或轮询。
       const unsub = scope.subscribe(derive);

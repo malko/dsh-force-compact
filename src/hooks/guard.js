@@ -23,14 +23,14 @@
  *   service's `compactRegion` (read live via `ctx.get('compaction')`), which
  *   condenses the head history and lets the loop retry with a smaller context.
  *
- * Both settings are read **per request** through the synchronous
- * `settings.get('falling-ts-force-compact')` so a `settings.yaml` edit is picked up on the
- * next model request without a restart.
+ * Both settings are read **per request** from the plugin's live Config refs
+ * (`readRawSetting`, bound by `apply`), so a settings-form edit is picked up on
+ * the next model request without a restart.
  *
  * @module @falling-ts/dsh-force-compact/request-guard
  */
 
-import { readSettings, DEFAULTS, NS } from '../core/settings.js'
+import { readSettings, readRawSetting, DEFAULTS } from '../core/settings.js'
 import { MAX_COMPACTION_ROUNDS } from '../core/policy.js'
 import {
   selectEarliestByTokens,
@@ -391,14 +391,12 @@ export async function clearStuckCompressingBanner(ctx, session) {
     // Only override a STALE COMPRESSING bracket — the "[强制压缩中>>>" residue a
     // failed/hung compaction leaves behind when `publishDone` never fires. A DONE
     // banner (phase 'done') is left to its own 3 s fallback timer, and a working /
-    // end badge needs no override. This is the SAME sync cached `settings.get` the
-    // non-important guard inside `publishUiStatus` uses — a cosmetic read, so a
-    // miss simply means "nothing stuck to clear" (no push, no churn).
-    const settings = ctx.get('settings')
-    if (settings === undefined || typeof settings.get !== 'function') return
-    const nsValue = settings.get(NS)
-    const phase = (nsValue != null && typeof nsValue === 'object' && nsValue[LIVE_UI_FIELD] != null && typeof nsValue[LIVE_UI_FIELD] === 'object')
-      ? nsValue[LIVE_UI_FIELD].phase
+    // end badge needs no override. Harness 0.1.7 removed `settings.get(ns)`; this
+    // reads the live Config ref the plugin was bound with. Cosmetic read: a miss
+    // simply means "nothing stuck to clear" (no push, no churn).
+    const liveUi = await readRawSetting(ctx, LIVE_UI_FIELD)
+    const phase = (liveUi != null && typeof liveUi === 'object' && typeof liveUi.phase === 'string')
+      ? liveUi.phase
       : undefined
     if (phase !== PHASE_COMPRESSING) return // nothing stuck to clear
     await publishUiStatus(ctx, randomWorkingPair(), true) // override the stale bracket

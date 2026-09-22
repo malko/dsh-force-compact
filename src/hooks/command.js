@@ -43,7 +43,7 @@ function __registerCommandBody(ctx) {
     return false
   }
 
-  commands.register({
+  const disposeCommand = commands.register({
     name: 'force-compact',
     description: 'Force-compact the agent session context now (compacts immediately when idle).',
     recordInput: false,
@@ -67,6 +67,14 @@ function __registerCommandBody(ctx) {
       }
     },
   })
+
+  // Hand the registration disposer to THIS plugin's effect scope. The commands
+  // service keeps its own scoped layer, so dropping the disposer would leave the
+  // command alive after unload/HMR — closing over this fiber's now-dead ctx, and
+  // making a re-apply throw "already registered".
+  if (typeof disposeCommand === 'function') {
+    ctx.effect(() => disposeCommand, 'force-compact: /force-compact command registration')
+  }
 
   ctx.logger.debug('[force-compact] registered /force-compact command')
   return true

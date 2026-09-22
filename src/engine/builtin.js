@@ -468,17 +468,22 @@ function clearFailureCooldown(sessionId) {
 
 /**
  * Checkpoint provenance carried on the replacement `user/message`'s `source`.
- * Uses the CANONICAL compaction-checkpoint marker (`{kind:'plugin',
- * plugin:'compact'}`) that `isCompactCheckpointSource` recognizes — so the
- * official `compaction/invariant` validator treats our replacement as a real
- * compaction checkpoint and enforces its correlation with the open
- * `compaction/start`. The plugin-specific identity rides on `compactionId`
- * (see `mintCompactionId`) and the bracket events, not on `source.plugin`,
- * keeping the checkpoint universally recognizable across all backends.
+ * Uses the CANONICAL compaction-checkpoint marker (`{kind:'compact-checkpoint'}`)
+ * that `isCompactCheckpointSource` recognizes — so the official
+ * `compaction/invariant` validator treats our replacement as a real compaction
+ * checkpoint, the conversation UI renders it as a compaction node, and the
+ * session-reference projection keeps it. The plugin-specific identity rides on
+ * `compactionId` (see `mintCompactionId`) and the bracket events, not on the
+ * source kind, keeping the checkpoint universally recognizable across backends.
  * `CHECKPOINT_SOURCE_BASE` is spread together with `compactionId` per
  * transaction (below).
+ *
+ * NOTE (harness 0.1.7): the old `{kind:'plugin', plugin:'compact'}` marker was
+ * retired; the V3→V4 session migration maps exactly that shape onto
+ * `'compact-checkpoint'` (`packages/session/session-format-v3-to-v4/src/sources.ts`),
+ * i.e. this is the shape the current core defines as canonical.
  */
-const CHECKPOINT_SOURCE_BASE = Object.freeze({ kind: 'plugin', plugin: 'compact' })
+const CHECKPOINT_SOURCE_BASE = Object.freeze({ kind: 'compact-checkpoint' })
 
 /** Mint a stable transaction identity (opaque string; branded conceptually). */
 function mintCompactionId() {
@@ -907,7 +912,15 @@ async function runTransaction(ctx, agent, session, region, signal, settings, sou
         // one compaction/summary"). Swallowing that rejection left an UNCLOSED
         // `compaction/start`, which `assertNoActiveCompaction` then used to refuse
         // every later compaction of the same session.
-        session.append('compaction/end', { compactionId, turn: currentOpenTurn(session), error: why })
+        session.append('compaction/end', {
+          compactionId,
+          turn: currentOpenTurn(session),
+          error: why,
+          // Echo the opening bracket's `sourceCommandId` (the invariant requires
+          // start/summary/end to agree; a mismatch makes this append THROW and the
+          // bracket stays open).
+          ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
+        })
       } catch { /* best effort */ }
       return null
     } else {
@@ -1094,10 +1107,23 @@ async function runTransaction(ctx, agent, session, region, signal, settings, sou
   }
 }
 
-/** Append `compaction/end` carrying the error so the lock is released explicitly. */
+/** Append `compaction/end` carrying the error so the lock is released explicitly.
+ *  The `sourceCommandId` recorded by the opening `compaction/start` is echoed back
+ *  here: the official `compaction/invariant` requires start/summary/end to AGREE on
+ *  it, and a mismatch makes the append THROW — which would leave the bracket open and
+ *  wedge every later compaction of that session until a reload. */
 function closeWithError(session, startEvent, compactionId, error, ctx) {
   try {
-    session.append('compaction/end', { compactionId, turn: currentOpenTurn(session), error: messageOf(error) })
+    const sourceCommandId = (startEvent !== null && typeof startEvent === 'object'
+      && startEvent.data !== null && typeof startEvent.data === 'object')
+      ? startEvent.data.sourceCommandId
+      : undefined
+    session.append('compaction/end', {
+      compactionId,
+      turn: currentOpenTurn(session),
+      error: messageOf(error),
+      ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
+    })
   } catch { /* best effort */ }
   warn(ctx, `builtin compaction transaction ended in error: ${messageOf(error)}`)
 }
@@ -1307,7 +1333,16 @@ export function projectRegion(session, region) {
       const msg = (projected && projected.content !== undefined) ? projected : raw
       if (msg && msg.content) {
         shadowedSeqs.push(seq)
-        messages.push({ role: 'user', content: msg.content, tool_call_id: msg.toolCallId })
+        // Harness 0.1.7 (session format V4): a tool result is its OWN `role:'tool'`
+        // message carrying `toolCallId` / `isError` / `source`. The old
+        // `role:'user'` + `tool-result` content block was REMOVED. The DeepSeek
+        // serializer pairs every assistant `tool_use` with an immediately following
+        // tool-role result and rejects the legacy shape with INVALID_REQUEST
+        // ("tool calls need immediate results" / "history ends with unresolved
+        // tools"), so rebuilding the old shape would fail EVERY summarization over
+        // a tool-bearing session. Push the canonical projection (normalizing the
+        // role) instead.
+        messages.push({ ...msg, role: 'tool' })
       }
     } else {
       // Still a surface node that yields no message (empty assistant usage

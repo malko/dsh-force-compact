@@ -6,8 +6,8 @@
  * Why settings at all
  * ------------------
  * The client half (`web/client.js`) already mirrors the `falling-ts-force-compact`
- * namespace through `settingsScope.bind` → `createSnapshotStore`, so ANY field
- * written by the host here is reflected in the browser live (the `SettingsScope`
+ * namespace through `configForms.get` → `createSnapshotStore`, so ANY field
+ * written by the host here is reflected in the browser live (the `ConfigForm`
  * revision-fencing contract). That is the ONLY sanctioned host→browser live-data
  * channel this independent plugin bundle can use — there is no reverse RPC seam
  * for a client-loaded plugin to expose arbitrary callable methods (the unary
@@ -52,6 +52,8 @@
  *
  * @module @falling-ts/dsh-force-compact/ui-signal
  */
+
+import { readRawSetting } from './settings.js'
 
 /** The settings field name carrying the live UI status (host-written, client-read). */
 export const LIVE_UI_FIELD = 'liveUi'
@@ -184,7 +186,7 @@ export function pinnedPayload(phase) {
 /**
  * Publish one UI status onto the `liveUi` field of the `falling-ts-force-compact`
  * namespace. This is THE host→browser delivery point: the client half's
- * `settingsScope.bind` mirror flips its snapshot on the next accepted
+ * `configForms.get` mirror flips its snapshot on the next accepted
  * revision, and the browser component repaints the `TurnStatus` DOM node.
  *
  * Guarantees:
@@ -213,14 +215,13 @@ export async function publishUiStatus(ctx, status, isImportant = false) {
     if (!isImportant) {
       let currentText
       try {
-        // SYNC read — the settings service's `get` returns the cached value
-        // immediately (same call style as settings.js:226); the gate is purely
-        // advisory (worst case: the write proceeds, nothing breaks), so there
-        // is no reason to await an async variant even if one ever appeared.
-        const nsValue = (typeof settings.get === 'function') ? settings.get(NS) : undefined
-        currentText = (nsValue != null && typeof nsValue === 'object')
-          ? nsValue[LIVE_UI_FIELD]?.text
-          : (typeof nsValue === 'string' ? nsValue : undefined)
+        // Harness 0.1.7 removed `settings.get(ns)`; read the live Config ref the
+        // plugin was bound with. The gate is purely advisory (worst case: the
+        // write proceeds, nothing breaks).
+        const liveUi = await readRawSetting(ctx, LIVE_UI_FIELD)
+        currentText = (liveUi != null && typeof liveUi === 'object')
+          ? liveUi.text
+          : (typeof liveUi === 'string' ? liveUi : undefined)
       } catch { /* read failure must not block the important path — fall through */ }
       if (typeof currentText === 'string' && currentText.startsWith('[')) return
     }

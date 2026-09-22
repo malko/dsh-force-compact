@@ -69,16 +69,18 @@
  *   because this cap is SCHEDULED through `AbortSignal.timeout` rather than
  *   merely compared — see `MAX_TIMEOUT_MS` for why that bound is hard.
  *
- * The namespace is registered against the `settings` service when one is
- * mounted. The schema is BUILT BEST-EFFORT through `@deepseek-ai/schemastery`:
- * when that bare module cannot be resolved from the plugin's install location
- * (common when the plugin is developed outside a node_modules root, where Node
- * cannot walk up to find it), {@linkcode buildSchema} returns `null` and
- * {@linkcode registerNamespace} falls back to registering the namespace with
- * **defaults only** (editable fields, no validation metadata) rather than
- * skipping registration entirely — so the settings panel still loads and the
- * values remain readable/writable. A `settings` service absence still results
- * in a no-op, so it is never a hard dependency.
+ * Harness 0.1.7 replaced the old `settings.register(ns, schema, { base })` API
+ * with a Config-driven model: this module builds the schema the plugin entry
+ * exports as `Config`, and the settings form namespace is the plugin's LOADER
+ * ENTRY ID (`falling-ts-force-compact`, see cordis.patch.yml). Defaults come from
+ * `.default()` and every field the form may write is `.volatile()`. The schema is
+ * BUILT BEST-EFFORT through `@deepseek-ai/schemastery`: when that bare module
+ * cannot be resolved from the plugin's install location (common when the plugin
+ * is developed outside a node_modules root, where Node cannot walk up to find
+ * it), {@linkcode buildConfigSchema} returns `undefined` — the entry then simply
+ * has no settings form and every Host read falls back to `DEFAULTS`. Nothing is
+ * registered at runtime, so a missing `settings` service is never a hard
+ * dependency.
  *
  * @module @falling-ts/dsh-force-compact/settings
  */
@@ -86,10 +88,11 @@
 /**
  * The settings namespace id for the force-compact configuration.
  *
- * Prefixed `falling-ts-` so it cannot collide with another plugin's
- * `force-compact` namespace — the `falling-ts` vendor prefix is shared by
- * every setting key this project owns. It is the top-level key in
- * `$DSH_HOME/settings.yaml`.
+ * It must equal this plugin's LOADER ENTRY ID (`falling-ts-force-compact`, see
+ * `cordis.patch.yml`): harness 0.1.7 derives the settings form namespace from the
+ * entry id, and `settings.update(ns, …)` resolves the entry by that same id. The
+ * `falling-ts-` vendor prefix keeps it from colliding with another plugin's
+ * `force-compact` entry.
  */
 export const NS = 'falling-ts-force-compact'
 
@@ -254,13 +257,21 @@ export async function readSettings(ctx) {
 }
 
 async function __readSettingsBody(ctx) {
-  const settings = ctx.get('settings')
-  if (settings === undefined || typeof settings.get !== 'function') return null
-  const rawSection = settings.get(NS)
-  if (rawSection === undefined) return null
-  // A non-object stored value (corrupt/legacy yaml edge) degrades to an empty
-  // section so every field resolves to its DEFAULT below — never a throw.
-  const section = (rawSection && typeof rawSection === 'object') ? rawSection : {}
+  void ctx
+  // Harness 0.1.7 removed `settings.get(ns)`: the live values now come from the
+  // plugin's own Config refs (bound by `apply`). Build the raw section from those
+  // refs; a missing holder degrades to an empty section so every field resolves
+  // to its DEFAULT below — never a throw.
+  const section = {}
+  if (liveConfig !== null && liveConfig !== undefined && typeof liveConfig === 'object') {
+    for (const field of Object.keys(liveConfig)) {
+      const ref = liveConfig[field]
+      if (ref !== null && ref !== undefined && typeof ref.get === 'function') {
+        const value = ref.get()
+        if (value !== undefined) section[field] = value
+      }
+    }
+  }
   const asBool = (field, fallback) =>
     (typeof section[field] === 'boolean' ? section[field] : fallback)
   const asPositiveInt = (field, fallback) =>
@@ -320,7 +331,7 @@ async function __readSettingsBody(ctx) {
  * it degrades to a plain `z.string().default(fallback)` so the field STILL
  * exists and is writable; the value is validated at read time in `readSettings`
  * (invalid strings coerce to the default). Crucially this NEVER throws, so the
- * field's construction can never take down the entire `buildSchema` call.
+ * field's construction can never take down the entire `buildConfigSchema` call.
  *
  * @param {any} z the resolved schemastery `z` (or a partial surface).
  * @param {string} fallback the default value (also the fallback-mode default).
@@ -342,26 +353,50 @@ function buildEnumField(z, fallback) {
 }
 
 /**
- * Read ONE RAW field of the `falling-ts-force-compact` namespace, WITHOUT the
- * per-request `readSettings` full-parse overhead. Cached-friendly (re-reads only
- * the single field) so it is safe to call from service-resolution paths.
+ * Live Config refs handed to `apply`. Every Host read goes through this holder,
+ * so a settings-form edit is picked up on the next read (harness 0.1.7's
+ * ConfigForm volatile-commit contract). Set once by the plugin entry.
+ */
+let liveConfig
+
+/**
+ * Bind the resolved plugin Config (schemastery volatile refs).
+ * @param {object|undefined} config
+ */
+export function bindConfig(config) {
+  liveConfig = config
+}
+
+/**
+ * Read the RAW current value of one config field, WITHOUT the per-request
+ * `readSettings` full-parse overhead. Reads a single ref so it is safe to call
+ * from service-resolution paths.
  *
- * @param {import('@deepseek-ai/cordis').Context} ctx
+ * Harness 0.1.7 removed `settings.get(ns)`; the live values now come from the
+ * plugin's own Config refs, bound by `apply`.
+ *
+ * @param {import('@deepseek-ai/cordis').Context} ctx unused; kept for call-site compatibility.
  * @param {string} field
- * @returns {Promise<unknown>} the raw stored value, or `undefined` when the
- *   settings service is not mounted or the field is unset.
+ * @returns {Promise<unknown>} the raw value, or `undefined` when unset/unavailable.
  */
 export async function readRawSetting(ctx, field) {
-  // SAFETY ENVELOPE: called from service-resolution and command paths; a
-  // rejecting `settings.get` or a non-section shape degrades to `undefined`
-  // (= "unset") rather than throwing.
+  void ctx
+  return readRawSettingSync(field)
+}
+
+/**
+ * Synchronous form of {@link readRawSetting} for callers already on a sync path
+ * (the debug-log gate in `core/log.js`). Same semantics; never throws.
+ * @param {string} field
+ * @returns {unknown} the current value, or `undefined` when unset/unavailable.
+ */
+export function readRawSettingSync(field) {
+  // SAFETY ENVELOPE: called from service-resolution, command, and logging paths;
+  // a missing holder or a throwing ref degrades to `undefined` (= "unset").
   try {
-    const settings = ctx.get('settings')
-    if (settings === undefined || typeof settings.get !== 'function') return undefined
-    const value = settings.get(NS)
-    if (value === undefined || value === null) return undefined
-    if (value !== null && typeof value !== 'object') return undefined
-    return value[field]
+    const ref = liveConfig === null || liveConfig === undefined ? undefined : liveConfig[field]
+    if (ref === undefined || ref === null || typeof ref.get !== 'function') return undefined
+    return ref.get()
   } catch {
     return undefined
   }
@@ -422,103 +457,68 @@ async function resolveZ() {
   return undefined
 }
 
-export async function buildSchema() {
-  try {
-    const z = await resolveZ()
-    if (z === undefined) return null
-    const schema = z.object({
-      disableThinking: z.boolean().default(DEFAULTS.disableThinking),
-      // Minimal chain: `.step()` and `.min()` were ADDED this pass and are
-      // exactly what broke the host's vendored schemastery surface (the
-      // standalone-node build resolves these fine but the host's z doesn't
-      // expose them as chainable). Fall back to a bare `z.number().default(…)`
-      // — the FLOOR IS STILL ENFORCED IN `readSettings` (asScaled clamps
-      // stored values BELOW the floor UP TO the floor before they're surfaced),
-      // and the web FORM enforces its own minimum at the input level
-      // (`useDraftNumberClamped`). So even though the schema carries no
-      // machine-checked lower bound, a hand-edited settings.yaml holding a
-      // sub-floor value still RESOLVES to the legal floor at read time, and
-      // the form refuses to persist a sub-floor draft. Documented trade-off:
-      // the schema is descriptive here; the floor is behavioral.
-      autoThresholdTokens: z.number().default(DEFAULTS.autoThresholdTokens),
-      // ABSOLUTE TOKEN COUNT retained at the latest end of the surface when an
-      // auto / forced compaction fires (see the `DEFAULTS` comment for the full
-      // semantics). `step(1)` constrains to whole tokens (schemastery has no
-      // `.int()`); `min(1)` guards the degenerate 0 case (which clamps to 1
-      // node minimum retained anyway).
-      retainLatestTokens: z.number().default(DEFAULTS.retainLatestTokens),
-      turnEndForceCompactionEnabled: z.boolean().default(DEFAULTS.turnEndForceCompactionEnabled),
-      // Debug-log gate, on by default; set false for production deployments.
-      debug: z.boolean().default(DEFAULTS.debug),
-      // Debug-log target; leading ~ expands to the OS user home. Default sits
-      // under the shared user $DSH_HOME so it is never dropped into a checkout.
-      logFile: z.string().default(DEFAULTS.logFile),
-      // How the plugin locates the compaction backend (realm-scoped per-agent
-      // vs host-global). Built best-effort: prefer a proper enum when the
-      // schemastery schema supports it; otherwise fall back to a plain
-      // `.default()` field so the field ALWAYS exists and stays writable (the
-      // value is still validated in `readSettings`, which coerces any invalid
-      // string to the default). NEVER let an unsupported enum construct throw —
-      // that would escape `buildSchema`'s try/catch and break the WHOLE
-      // namespace registration (regressing the settings panel to "loading").
-      compactionMode: buildEnumField(z, DEFAULTS.compactionMode),
-      // The builtin engine fallback (see `engine/backend.js`): on by default
-      // so the plugin's own engine takes over whenever the official
-      // `compaction` service is unreachable (standard-preset realm isolation).
-      // Value is coerced at read-time in `readSettings`, so the schema field is
-      // purely UI affordance.
-      builtinEnabled: z.boolean().default(DEFAULTS.builtinEnabled),
-      // Token ceiling applied to the plugin's own summarizer LLM call. Bounds
-      // runaway summaries; combined with the shrink gate (the summary must be
-      // strictly smaller than the span it replaces) this keeps transactions
-      // bounded while ensuring compression is always net-negative.
-      maxSummaryTokens: z.number().default(DEFAULTS.maxSummaryTokens),
-      liveUi: z.any(), // TRANSIENT UI MESSENGER (core/ui-signal.js): host-written { phase,text,textId,color }, textId = locale-independent discriminator the client half localizes via ctx.locale. z.any() used because the vendored schemastery exposes object/any/string/number/boolean/array only (no record/unknown/chained .optional()); z.record(z.unknown()).optional() throws there and aborts the whole z.object(...), stranding the settings panel on "loading". Absence-by-default is inherent (no .default). readSettings ignores it — not a user preference.
-      // Hard wall-clock cap for ONE summarization stream (ms). Floored at
-      // read-time by `MIN_TIMEOUT_MS`, ceiled by `MAX_TIMEOUT_MS` and truncated
-      // to an integer (the schema is descriptive here, those bounds are
-      // behavioral — same documented trade-off as the token scales).
-      summarizationTimeoutMs: z.number().default(DEFAULTS.summarizationTimeoutMs),
-    })
-    return schema
-  } catch {
-    return null
-  }
+/** Add `.volatile()` when the built field supports it. Every user-writable and
+ *  host-written field must be volatile: harness 0.1.7's `settings.update`
+ *  refuses non-volatile paths, and only volatile fields may be form-written.
+ *  NOTE: a schemastery schema is a CALLABLE (typeof 'function'), so the guard
+ *  must accept functions as well as objects. */
+function asVolatile(field) {
+  const carrier = (typeof field === 'object' && field !== null) || typeof field === 'function'
+  return (carrier && typeof field.volatile === 'function') ? field.volatile() : field
 }
 
 /**
- * Register the `falling-ts-force-compact` settings namespace when a `settings` service is
- * mounted. Idempotent for the calling fiber; safe to call once in `apply`.
+ * Build the plugin's schemastery `Config` schema — the settings form namespace
+ * the Loader auto-derives for this entry.
  *
- * @param {import('@deepseek-ai/cordis').Context} ctx
- * @returns {Promise<boolean>} whether the namespace was registered.
+ * Harness 0.1.7 replaced `settings.register(ns, schema, { base })` with a
+ * Config-driven model: a plugin exports `Config`, the form namespace is the
+ * LOADER ENTRY ID (`falling-ts-force-compact`), defaults come from `.default()`,
+ * and every field the form may write must be `.volatile()`. Returns `undefined`
+ * when schemastery is unresolvable — the entry then has no settings form, and
+ * the Host reads fall back to `DEFAULTS`.
+ *
+ * @returns {Promise<object|undefined>}
  */
-export async function registerNamespace(ctx) {
-  const settings = ctx.get('settings')
-  if (settings === undefined || typeof settings.register !== 'function') return false
-
-  const schema = await buildSchema()
-  // Prefer the full validation schema. When it could not be built (the
-  // schemastery bare module is unresolvable from this install location — a
-  // common development layout with no ancestor `node_modules`), register a
-  // minimal placeholder schema object instead of skipping: the namespace still
-  // gets exposed (so the settings panel loads and values stay
-  // readable/writable) but without field-level validation metadata. Both layers
-  // carry the same `base` defaults, so either way the effective values resolve
-  // identically.
-  const thirdArg = { base: { ...DEFAULTS } }
-  // Placeholder MUST be callable (callable-validator contract of
-  // `settings.register`): identity passthrough that accepts any section shape
-  // so the namespace stays exposed even when schemastery is unresolvable.
-  const placeholderSchema = (section) => section
-  placeholderSchema.toJSON = () => ({})
-  // Contain the actual `settings.register` call: a hostile/partial `settings`
-  // implementation that throws on register must NOT break the plugin's `apply`
-  // (which registers all listeners). Degrade to "not registered" (false).
+export async function buildConfigSchema() {
   try {
-    settings.register(NS, schema !== null ? schema : placeholderSchema, thirdArg)
-    return true
+    const z = await resolveZ()
+    if (z === undefined) return undefined
+    return z.object({
+      disableThinking: asVolatile(z.boolean().default(DEFAULTS.disableThinking)),
+      // Minimal chain: `.step()` / `.min()` are NOT used because the host's
+      // vendored schemastery surface does not expose them as chainable. The FLOOR
+      // IS STILL ENFORCED IN `readSettings` (asScaled clamps stored values BELOW
+      // the floor UP TO the floor before they are surfaced), and the web form
+      // enforces its own minimum at the input level. Documented trade-off: the
+      // schema is descriptive here; the floor is behavioral.
+      autoThresholdTokens: asVolatile(z.number().default(DEFAULTS.autoThresholdTokens)),
+      retainLatestTokens: asVolatile(z.number().default(DEFAULTS.retainLatestTokens)),
+      turnEndForceCompactionEnabled: asVolatile(z.boolean().default(DEFAULTS.turnEndForceCompactionEnabled)),
+      // Debug-log gate, on by default; set false for production deployments.
+      debug: asVolatile(z.boolean().default(DEFAULTS.debug)),
+      // Debug-log target; leading ~ expands to the OS user home.
+      logFile: asVolatile(z.string().default(DEFAULTS.logFile)),
+      // How the plugin locates the compaction backend (realm-scoped per-agent vs
+      // host-global). Built best-effort (see `buildEnumField`); the value is
+      // validated at read time in `readSettings`.
+      compactionMode: asVolatile(buildEnumField(z, DEFAULTS.compactionMode)),
+      // The builtin engine fallback (see `engine/backend.js`): on by default.
+      builtinEnabled: asVolatile(z.boolean().default(DEFAULTS.builtinEnabled)),
+      // Token ceiling applied to the plugin's own summarizer LLM call.
+      maxSummaryTokens: asVolatile(z.number().default(DEFAULTS.maxSummaryTokens)),
+      // TRANSIENT UI MESSENGER (core/ui-signal.js): host-written
+      // { phase, text, textId, color }, textId = locale-independent discriminator
+      // the client half localizes. z.any() because the vendored schemastery
+      // exposes object/any/string/number/boolean/array only. Absence-by-default
+      // is inherent (no .default); readSettings ignores it.
+      liveUi: asVolatile(z.any()),
+      // Hard wall-clock cap for ONE summarization stream (ms). Floored/ceiled at
+      // read time by `MIN_TIMEOUT_MS` / `MAX_TIMEOUT_MS` (the schema is
+      // descriptive here; those bounds are behavioral).
+      summarizationTimeoutMs: asVolatile(z.number().default(DEFAULTS.summarizationTimeoutMs)),
+    })
   } catch {
-    return false
+    return undefined
   }
 }

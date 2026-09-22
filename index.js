@@ -45,7 +45,7 @@
  */
 
 import { compactSession } from './src/engine/checkpoint.js'
-import { registerNamespace, readRawSetting } from './src/core/settings.js'
+import { buildConfigSchema, bindConfig, readRawSetting } from './src/core/settings.js'
 import { ensureDebugLogger } from './src/core/log.js'
 // `thinkingDisabled` is imported solely to keep the `guard.thinkingDisabled`
 // helper reachable from the plugin root for consumers who DO want the blanket
@@ -60,6 +60,20 @@ import { guardFn, installCrashNet } from './src/core/crashnet.js'
 
 /** @type {string} the function plugin's display name. */
 export const name = 'force-compact'
+
+/**
+ * The plugin's schemastery `Config` — the settings form namespace the Loader
+ * auto-derives for this entry (harness 0.1.7's Config-driven settings model,
+ * which replaced the removed `settings.register(ns, schema, { base })` API).
+ *
+ * The namespace IS this entry's loader id (`falling-ts-force-compact`, see
+ * cordis.patch.yml). `apply` receives the resolved values and binds them for the
+ * Host reads. Top-level await because schemastery is resolved lazily (bare
+ * specifier first, then the vendored copy for a standalone checkout);
+ * `undefined` leaves the entry without a settings form, and reads fall back to
+ * `DEFAULTS`.
+ */
+export const Config = await buildConfigSchema()
 
 /**
  * Per-session COMPRESSION SLOT — one in-flight `compactSession` operation per
@@ -128,103 +142,28 @@ const compactSlot = new Map()
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
  */
-const __applyInner = (ctx) => {
+const __applyInner = (ctx, config) => {
+  // The resolved plugin Config (schemastery volatile refs) — every Host read goes
+  // through this holder. Bound FIRST so any listener firing during this apply
+  // already sees live values rather than DEFAULTS.
+  bindConfig(config)
   ctx.logger.info('[force-compact] apply START; settings=' + (ctx.get('settings') !== undefined ? 'present' : 'ABSENT') + ' compaction=' + (ctx.get('compaction') !== undefined ? 'present' : 'ABSENT'))
-  // Register the `falling-ts-force-compact` settings namespace. This is done
-  // LAZILY and IDEMPOTENTLY rather than in a boot-time effect because the
-  // `settings` service (and the schemastery schema builder it depends on) can
-  // arrive well AFTER this plugin's boot-time effects run — the same late-mount
-  // ordering that makes a boot-time `ctx.get('fs')` observe `undefined`. A
-  // boot-time registration attempt would silently no-op and leave the settings
-  // panel permanently stuck on "loading". Instead it is attempted at the top of
-  // each guarded listener (where services are guaranteed live) until it settles:
-  // `settingsState.attempted` records a settled outcome, `installed` means the
-  // namespace is registered and further attempts are a cheap early return.
-  const settingsState = { settled: false, installed: false, warnedSchemas: false, scheduled: false }
-  // Schedule a bounded retry of the namespace install. Called only while the
-  // `settings` service is still absent at the attempt site (boot or a guarded
-  // listener that ran before the preset plane mounted it). Each retry re-checks;
-  // on success the latch settles and the timer self-clears. Because it settles
-  // and cancels itself on completion, it is installation bookkeeping, not a
-  // persistent timer or piece of long-lived state.
-  const RETRY_DELAY_MS = 750
-  const RETRY_MAX_ATTEMPTS = 40
-  const retryTimer = { value: undefined }
-  const maybeRetryRegister = () => {
-    if (settingsState.settled || retryTimer.value !== undefined) return
-    let attempts = 0
-    const attempt = () => {
-      retryTimer.value = undefined
-      if (settingsState.settled) return
-      attempts += 1
-      void (async () => {
-        const result = await tryRegisterOnce()
-        if (result) {
-          // Settled (success, or a terminal "schema build failed" outcome).
-          if (retryTimer.value !== undefined) clearTimeout(retryTimer.value)
-          retryTimer.value = undefined
-          return
-        }
-        // Still missing; bound the retry count so a genuinely absent service
-        // cannot spin forever. After the cap we stop scheduling and leave the
-        // guarded listeners (agent/* events) as the final safety net.
-        if (attempts >= RETRY_MAX_ATTEMPTS) {
-          settingsState.settled = true
-          return
-        }
-        if (settingsState.settled) return
-        retryTimer.value = setTimeout(attempt, RETRY_DELAY_MS)
-      })().catch(() => {})
-    }
-    attempt()
-  }
-  const tryRegisterOnce = async () => {
-    if (settingsState.settled) return true
-    const settings = ctx.get('settings')
-    if (settings === undefined || typeof settings.register !== 'function') {
-      // Settings service not mounted yet; keep retrying (do NOT settle).
-      return false
-    }
-    try {
-      const ok = await registerNamespace(ctx)
-      settingsState.settled = true
-      if (ok) {
-        settingsState.installed = true
-        ctx.logger.info('[force-compact] registered settings namespace "falling-ts-force-compact"')
-      } else {
-        // `settings` exists but `buildSchema()` failed (typically the
-        // schemastery bare-module import could not resolve in this loader).
-        // Settle so we stop retrying, but WARN so the silent no-op is
-        // diagnosable; warn only once.
-        if (!settingsState.warnedSchemas) {
-          settingsState.warnedSchemas = true
-          ctx.logger.warn(
-            '[force-compact] settings present but schema build failed — ' +
-              'namespace "falling-ts-force-compact" NOT registered (check @deepseek-ai/schemastery resolvability)',
-          )
-        }
-      }
-      return true
-    } catch (error) {
-      const message = error instanceof Error ? error.stack || error.message : String(error)
-      // Transient failure: keep retrying (do NOT settle), warn once.
-      if (!settingsState.warnedSchemas) {
-        settingsState.warnedSchemas = true
-        ctx.logger.warn(`[force-compact] settings namespace registration threw — ${message}`)
-      }
-      return false
-    }
-  }
-  // Entry point invoked at boot (eager) and atop each guarded listener. Tries
-  // once NOW; if the service is absent it schedules a bounded self-cancelling
-  // retry instead of giving up, so a cold-start with no agent traffic still
-  // lands the namespace (and therefore un-sticks the settings panel).
-  const maybeRegisterSettingsNamespace = () => {
-    if (settingsState.settled) return
-    void (async () => {
-      const ok = await tryRegisterOnce()
-      if (!ok) maybeRetryRegister()
-    })().catch(() => {})
+  // Declare this plugin's OWN settings page (web/client.js registers a
+  // settings.section), so the harness must not auto-generate one.
+  //
+  // Harness 0.1.7 replaced the old `settings.register(ns, schema, { base })` API
+  // with a Config-driven model: the form namespace IS this entry's loader id
+  // (`falling-ts-force-compact`, see cordis.patch.yml) and the fields come from
+  // the `Config` schema this module exports. Nothing is registered at runtime,
+  // so the old lazy-retry installation is gone. The `settings` service still
+  // mounts later than this plugin's boot effect, hence the lazy `ctx.inject`.
+  try {
+    ctx.inject(['settings'], (child) => {
+      child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.logger.warn(`[force-compact] settings.configure declaration failed (cosmetic only) — ${message}`)
   }
 
   // Route this plugin's own `[force-compact]` log lines to a durable file when
@@ -244,19 +183,12 @@ const __applyInner = (ctx) => {
     })
   }
 
-  // Attempt BOTH installations ONCE NOW, at boot (fire-and-forget). When a
+  // Install the debug-log sink ONCE NOW, at boot (fire-and-forget). When a
   // service is already mounted this completes it immediately; when it is still
   // undefined (the usual case at this early point — the `agent-presets:*` plane
-  // mounts shortly after) the settings installer additionally schedules a
-  // bounded, self-cancelling retry rather than waiting passively for the first
-  // agent/* event. Doing this eagerly matters for the settings namespace
-  // specifically: a browser client that opens the settings page BEFORE any
-  // agent activity would otherwise wait indefinitely for the namespace to
-  // appear. The eager boot call and the guarded-listener calls are safe to
-  // overlap (the latches deduplicate), and these are observer-only paths whose
-  // failures never disturb requests.
+  // mounts shortly after) the guarded listeners re-attempt it and the install
+  // latch deduplicates. Observer-only: a failure never disturbs requests.
   maybeInstallDebugSink()
-  maybeRegisterSettingsNamespace()
 
   // Each registration is wrapped in a labeled, logged try/catch so a real-
   // runtime throw is PINPOINTED (name + full stack) and CONTAINED — a bad
@@ -272,15 +204,6 @@ const __applyInner = (ctx) => {
       ctx.logger.error(`[force-compact][diag] FAILED to register '${label}' — ${detail}`)
     }
   }
-
-  // Cancel the pending namespace-install retry when this fiber tears down, so
-  // no stray timer survives plugin stop/removal. `clearTimeout(undefined)` is a
-  // safe no-op when nothing is scheduled.
-  guard('settings install retry cleanup', () => {
-    ctx.effect(() => () => {
-      if (retryTimer.value !== undefined) clearTimeout(retryTimer.value)
-    }, 'force-compact: settings install retry cleanup')
-  })
 
   // Register the `/force-compact` slash command (idle → compact now; busy →
   // queue a force flag the `agent/pre-step` hook consumes). NO-OP at boot when
@@ -370,7 +293,6 @@ const __applyInner = (ctx) => {
     // the request proceeds normally, never crashing the request chain.
     try {
       maybeInstallDebugSink()
-      maybeRegisterSettingsNamespace()
       maybeRegisterCommand()
       maybeInstallWireRewrite()
       // NOTE (2026-09): the former CONVERSATION-START Live-UI forced override
@@ -420,7 +342,6 @@ async function __agentRequestListenerBody(ctx, payload, next) {
     // rejecting `next()` would otherwise escape the per-step seam. Contain them
     // so the step ALWAYS routes through `next()` (the Waterfall requirement).
     try { maybeInstallDebugSink() } catch { /* non-fatal */ }
-    try { maybeRegisterSettingsNamespace() } catch { /* non-fatal */ }
     try { maybeRegisterCommand() } catch { /* non-fatal */ }
     try { maybeInstallWireRewrite() } catch { /* non-fatal */ }
     const agent = payload && payload.agent
@@ -507,7 +428,6 @@ async function __agentRequestListenerBody(ctx, payload, next) {
     // IIFE keeps its own `.catch`/`.finally` for the background compaction op.
     try {
       maybeInstallDebugSink()
-      maybeRegisterSettingsNamespace()
       maybeRegisterCommand()
       const sid = (session && typeof session.id === 'string') ? session.id : '?'
       const agents = ctx.get('agents')
@@ -562,9 +482,13 @@ async function __agentRequestListenerBody(ctx, payload, next) {
  * unchanged. `apply` is called ONCE per fiber at boot — the process-wide net
  * ({@link installCrashNet}) is installed from inside the inner body before
  * any listener is registered.
+ *
+ * `config` is the Loader-resolved plugin Config (schemastery volatile refs) and
+ * MUST be forwarded: the Host reads every tunable through those refs, so
+ * dropping it would silently pin every setting to `DEFAULTS`.
  */
-export const apply = guardFn('index.apply', (ctx) => {
+export const apply = guardFn('index.apply', (ctx, config) => {
   // Process-wide net — at most one install per process, before anything else.
   installCrashNet()
-  return __applyInner(ctx)
+  return __applyInner(ctx, config)
 })

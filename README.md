@@ -229,7 +229,9 @@ summarization wire-fields → <provider>/<model>: reasoningEffort='off' + reason
 
 ## Settings
 
-`$DSH_HOME/settings.yaml`, namespace `falling-ts-force-compact`:
+Namespace `falling-ts-force-compact` (the profile entry's loader id); values are
+written to the profile's `cordis.patch.yml` (harness 0.1.7 onward; formerly
+`$DSH_HOME/settings.yaml`):
 
 | key | type | default | meaning |
 |-----|------|---------|---------|

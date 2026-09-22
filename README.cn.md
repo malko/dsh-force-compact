@@ -222,7 +222,8 @@ summarization wire-fields → <provider>/<model>: reasoningEffort='off' + reason
 
 ## 设置
 
-`$DSH_HOME/settings.yaml`,命名空间 `falling-ts-force-compact`:
+命名空间 `falling-ts-force-compact`(= profile 里该条目的 loader id),值写进 profile 的
+`cordis.patch.yml`(harness 0.1.7 起;旧版是 `$DSH_HOME/settings.yaml`):
 
 | 键 | 类型 | 默认 | 含义 |
 |-----|------|------|------|
@@ -230,7 +231,7 @@ summarization wire-fields → <provider>/<model>: reasoningEffort='off' + reason
 | `autoThresholdTokens` | 数字 ≥ 32000 | `32000` | 门禁的预计 token 触发值。越低越激进,常驻请求越小。读取时不低于 32000(低于则抬高)。 |
 | `retainLatestTokens` | 正整数 ≥ 8000 | `8000` | 从会话最新条目起保留的最新 token 数,逐字保留;更早内容一次性发往摘要。读取时不低于 8000。同时驱动自动门禁与 `/force-compact`。 |
 | `turnEndForceCompactionEnabled` | 布尔 | `true` | agent 转入 `idle` 时压缩。 |
-| `debug` | 布尔 | `true` | 把 `[force-compact]` 诊断打到插件日志。**实时生效**(2026-09):开关在每一条导出日志时实时读取,改 `settings.yaml` 后下一行即生效,无需重启;`logFile` 路径在安装时固定,改路径需重启进程。 |
+| `debug` | 布尔 | `true` | 把 `[force-compact]` 诊断打到插件日志。**实时生效**(2026-09):开关在每一条导出日志时实时读取,改设置表单(或 profile 的 `cordis.patch.yml`)后下一行即生效,无需重启;`logFile` 路径在安装时固定,改路径需重启进程。 |
 | `logFile` | 字符串 | `~/.dsh/logs/dsh-force-compact.log` | 诊断输出路径(`~` 展开到家目录)。 |
 | `compactionMode` | `'realm' \| 'global'` | `'realm'` | 官方服务解析策略(优先级一)。 |
 | `builtinEnabled` | 布尔 | `true` | 内置引擎回落闸门。 |

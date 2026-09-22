@@ -244,7 +244,10 @@ async function __summarizeBody(ctx, config, agent, input, signal, extra) {
 
   const request = [
     ...regionMessages,
-    { role: 'user', content: [{ type: 'text', text: COMPACTION_INSTRUCTION }], source: { kind: 'plugin', plugin: 'force-compact' } },
+    // No `source`: harness 0.1.7 removed the `plugin` message-source kind, and the
+    // official compaction-basic summarizer likewise appends a bare
+    // `{ role: 'user', content: [...] }` directive (compaction-basic/summarizer.ts).
+    { role: 'user', content: [{ type: 'text', text: COMPACTION_INSTRUCTION }] },
   ]
   const options = {
     provider: target.provider,
@@ -657,9 +660,22 @@ function renderFinish(finish) {
 export function adapterIdleBound(ctx, provider) {
   try {
     const settings = ctx === undefined || ctx === null ? undefined : ctx.get('settings')
-    if (settings === undefined || settings === null || typeof settings.get !== 'function') return undefined
+    if (settings === undefined || settings === null) return undefined
+    // Harness 0.1.7 removed `settings.get(ns)`. Another plugin's namespace is now
+    // reachable only through `describe()`, whose descriptors carry the resolved
+    // `value`; any failure here degrades to the platform default, which the
+    // caller already handles (it is a diagnostic bound, never a control input).
     const section = (ns) => {
-      const value = settings.get(ns)
+      if (typeof settings.describe !== 'function') return undefined
+      let descriptors
+      try {
+        descriptors = settings.describe()
+      } catch {
+        return undefined
+      }
+      if (!Array.isArray(descriptors)) return undefined
+      const found = descriptors.find(entry => entry !== null && typeof entry === 'object' && entry.ns === ns)
+      const value = found === undefined ? undefined : found.value
       return (value !== undefined && value !== null && typeof value === 'object') ? value : undefined
     }
     const piAi = section('llm-pi-ai')

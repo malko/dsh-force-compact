@@ -34,7 +34,7 @@
  * @module @falling-ts/dsh-force-compact/debug-log
  */
 
-import { readSettings, DEFAULTS, NS } from './settings.js'
+import { readSettings, readRawSettingSync, DEFAULTS, NS } from './settings.js'
 
 /** Marker identifying this plugin's own log lines (matches every `ctx.logger.*('[force-compact] …')` call site). */
 const MARKER = '[force-compact]'
@@ -194,21 +194,17 @@ const debugState = { attempted: false, installed: false }
 
 /**
  * Read the LIVE `debug` setting synchronously on every call (2026-09: no
- * module-level cache — settings.yaml is the single source of truth and a flip
- * must take effect on the very next exported line). Resolves through the
- * `settings` service's synchronous read (`getSync`), or its ordinary read when
- * backed by a local store. Returns a settled boolean (never throws): missing
- * values fall back to the composition default.
+ * module-level cache — a flip must take effect on the very next exported line).
+ *
+ * Harness 0.1.7 removed the `settings.getSync(ns)` / `settings.get(ns)` API; the
+ * live value now comes from the plugin's own Config ref (bound by `apply`).
+ * Returns a settled boolean (never throws): a missing value falls back to the
+ * composition default.
  */
 function liveDebugSetting(ctx) {
+  void ctx
   try {
-    const raw = ctx.get?.('settings')
-    let v
-    if (raw != null && typeof raw.getSync === 'function') {
-      v = raw.getSync(NS)?.debug
-    } else if (typeof raw?.get === 'function') {
-      v = raw.get(NS)?.debug
-    }
+    const v = readRawSettingSync('debug')
     return v !== undefined ? v === true : DEFAULTS.debug
   } catch {
     return DEFAULTS.debug

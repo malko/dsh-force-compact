@@ -415,6 +415,53 @@ DeepSeek 适配器（无独立的 llama.cpp 适配器包），再起一份 adapt
 
 ---
 
+## harness 0.1.7-alpha.2 适配（2026-09-23）：三处破坏性变更
+
+peer 基线为 **`>=0.1.7-alpha.1`**（cordis `>=4.0.4`、schemastery `>=3.18.4`）。
+peer 清单按**实际用到的包**逐一声明（除 cordis 外全部 `optional`——它们在 profile 里由
+dsh 安装提供）：`dsh-settings`（Config/表单）、`dsh-compaction`
+（`compactRegion`/`compactNow`）、`dsh-llm`（`llm.stream`）、`dsh-token-meter`
+（`measure`）、`dsh-agent`（`agents.get` + `agent/*` 事件）、`dsh-session`
+（`Session`/`sessions.flush`）、`dsh-session-projection`（`projectedTokens`）、
+`dsh-commands`（`/force-compact`）、`schemastery`（Config schema），客户端
+`dsh-client-ui-settings` / `dsh-client-locale` / `dsh-client-store`。
+0.1.7 有三处直接命中本插件：
+
+1. **settings API 整体更换** —— 旧的 `settings.register(ns, schema, { base })` 与
+   `settings.get(ns)` **已被删除**（服务换成 `SettingsForms`，`settings-file` 整包删除）。
+   新模型：插件**导出 schemastery `Config`**（字段标 `.volatile()`）、
+   `apply(ctx, config)` 收值、读值用 `config.<field>.get()`；**设置命名空间 = 条目
+   loader id**，故 `cordis.patch.yml` 的 `insert.id` 必须是 `falling-ts-force-compact`；
+   设置持久化载体从 `$DSH_HOME/settings.yaml` 变为 profile 的 `cordis.patch.yml`。
+   本插件据此：`src/core/settings.js` 新增 `bindConfig` / `buildConfigSchema`（全部字段
+   `.volatile()`），`readSettings` / `readRawSetting` 改从绑定后的 Config 引用读，
+   `apply` 末尾声明 `settings.configure({ auto: false }, ctx.fiber)`，并删除整套
+   `registerNamespace` + 40×750ms 重试计时器。
+   **注意 `MIN_TOKEN_SCALES` 的下限仍然生效**（`autoThresholdTokens ≥ 32000`、
+   `retainLatestTokens ≥ 8000`、`maxSummaryTokens ≥ 1024`）——设更低的值会被读时抬回下限，
+   排查"改了配置没生效"时先看这里。
+2. **工具结果消息形状（会话格式 V4）** —— 0.1.7 把 `ToolResultMessage` 改成
+   `role:'tool'` + 消息上挂 `toolCallId` / `isError` / `source`；旧的 `role:'user'` +
+   `content[0] = {type:'tool-result'}` 块类型**整族删除**。`engine/builtin.js` 的
+   `projectRegion` 原先重建旧形状，会让 DeepSeek 序列化器以 `INVALID_REQUEST`
+   （"tool calls need immediate results"）拒绝**任何含工具调用的会话**的摘要调用 →
+   压缩永不提交。现改为直接推入规范化后的投影消息（`{ ...msg, role: 'tool' }`）。
+3. **检查点 source 标识** —— 官方从 `{kind:'plugin',plugin:'compact'}` 换成
+   **`{kind:'compact-checkpoint', compactionId}`**（`compaction/src/checkpoint.ts` 的
+   `isCompactCheckpointSource`）。旧 kind 仍能落盘，但 UI 不再渲染成压缩节点、会话引用面
+   不再识别。`builtin.js` 的 `CHECKPOINT_SOURCE_BASE` 已改新 marker；同时
+   `summarizer.js` 的摘要指令消息去掉了 `source`（官方 `plugin` source kind 已删除，
+   官方 `compaction-basic` 同样不带 source）。
+
+其余接缝（六个事件、`compaction.compactRegion` 签名、`commands.register`、
+`tokenMeter.measure` 返回形状、`agents.get`、`sessions.flush`、`sessionProjections`、
+`session.append` 的 surfaceOp 校验、`deriveEventMessage`）**均未变**。
+
+端到端验证（0.1.7-alpha.2，含工具调用的会话）：
+`builtin compaction OK — replaced span seq[35..38] (4 nodes, ~19982 tokens)`；落盘检查点
+`source={"kind":"compact-checkpoint","compactionId":"fc-…"}`、
+`surfaceOp={"op":"replace","startSeq":35,"endSeq":38}`。
+
 ## 主题（浅色 / 暗色）：颜色一律走 `--fcts-*`（2026-09-17 增补）
 
 本插件的设置分区与控件用内联 style。**内联 style 里的 `var()` 会沿 DOM 继承解析**，所以
@@ -505,7 +552,7 @@ node --import <harness>/node_modules/tsx/dist/esm/index.mjs \
 
 ## 概览
 
-- 插件的持久效果是**追加到会话日志的压缩事务**——具体形态取决于实际走了哪条引擎：走官方时落 `compaction/*` 系列（`compaction/start`、`compaction/summary`、`compaction/end`）加一个 `surfaceOp:replace` 的 `user/message`；走内置时同样落 `compaction/*` 系列（`compaction/start`、`compaction/summary`、`compaction/end`，字段形状与官方完全一致）加同样形态的 `user/message`。两种事务都以"前置括号事件 + 后置 replace 表面节点"的形式落地。除上文"例外"节的单用途定时器（`ui-signal.js` `publishDone`，有意偏离，见该节）外，插件不引入 timer 或内存态存储；Host 半部保持是**核心模型请求缝**（`agent/request` / `agent/pre-step`）与 `session/flush` 上的纯 Host 监听器。**另有一个 web client 半部**（`web/client.js`，`package.json` 的 `exports["./client"]` + `dsh.client.platform: web`，经 client module 系统自动组成，无需改 web-app 组合）：仅注册一个 `settings.section`（设置页左侧菜单"强制压缩 / Force Compact"分区，order 30），经 `settingsScope.bind({ namespace: 'falling-ts-force-compact' })` 镜像成 uSES 安全的 `SnapshotStore` 并读写字段（`scope.set`/`scope.unset` 写回 `settings.yaml`），**不**引入 timer、内存态存储或额外订阅；client 半部 `inject: ['slots','locale','settingsScope']`（这三个 client 服务在 client 启动时即可用，与 Host 侧的 `compaction` 运行时依赖不同）。**liveUi 徽标文字四语**：宿主发出的 `liveUi` 事件携带语言无关的 `textId`（相位名或 `working.N`）+ 规范中文 `text`；badge 显示文本由 client 半部经 `ctx.locale` 的 **zh/en/ja/ko** 词典按 `textId` 本地化（`badgeCompressing`/`badgeDone`/`badgeWorkingN`），跟随应用语言——英文 UI 显示英文俏皮话，日文/韩文 UI 显示对应译文，中文 UI 保持原文；宿主半部无 locale 服务，刻意保持语言无关（textId 缺失/未知时 client 回落到规范中文 `text`）。语言目录项与词典登记见下文"界面文案与语言"节。
+- 插件的持久效果是**追加到会话日志的压缩事务**——具体形态取决于实际走了哪条引擎：走官方时落 `compaction/*` 系列（`compaction/start`、`compaction/summary`、`compaction/end`）加一个 `surfaceOp:replace` 的 `user/message`；走内置时同样落 `compaction/*` 系列（`compaction/start`、`compaction/summary`、`compaction/end`，字段形状与官方完全一致）加同样形态的 `user/message`。两种事务都以"前置括号事件 + 后置 replace 表面节点"的形式落地。除上文"例外"节的单用途定时器（`ui-signal.js` `publishDone`，有意偏离，见该节）外，插件不引入 timer 或内存态存储；Host 半部保持是**核心模型请求缝**（`agent/request` / `agent/pre-step`）与 `session/flush` 上的纯 Host 监听器。**另有一个 web client 半部**（`web/client.js`，`package.json` 的 `exports["./client"]` + `dsh.client.platform: web`，经 client module 系统自动组成，无需改 web-app 组合）：仅注册一个 `settings.section`（设置页左侧菜单"强制压缩 / Force Compact"分区，order 30），经 `ctx.configForms.get('falling-ts-force-compact')` 镜像成 uSES 安全的 `SnapshotStore` 并读写字段（`scope.set`/`scope.unset` 写回 `settings.yaml`），**不**引入 timer、内存态存储或额外订阅；client 半部 `inject: ['slots','locale','configForms']`（这三个 client 服务在 client 启动时即可用，与 Host 侧的 `compaction` 运行时依赖不同）。**liveUi 徽标文字四语**：宿主发出的 `liveUi` 事件携带语言无关的 `textId`（相位名或 `working.N`）+ 规范中文 `text`；badge 显示文本由 client 半部经 `ctx.locale` 的 **zh/en/ja/ko** 词典按 `textId` 本地化（`badgeCompressing`/`badgeDone`/`badgeWorkingN`），跟随应用语言——英文 UI 显示英文俏皮话，日文/韩文 UI 显示对应译文，中文 UI 保持原文；宿主半部无 locale 服务，刻意保持语言无关（textId 缺失/未知时 client 回落到规范中文 `text`）。语言目录项与词典登记见下文"界面文案与语言"节。
 - **两条压缩引擎**（见上文"双引擎架构"节）：
   - **官方引擎**——`compaction` 服务提供的 `compactNow` / `compactRegion`，由 preset 平面（`include:agent-presets:compaction-basic`）挂载，**是运行时可选依赖**：插件**不**声明 `inject`——profile 层条目在进程启动时激活，彼时 preset 平面尚未挂载该服务，硬 `inject` 会导致 `assertEntriesActivated` 启动断言失败；各压缩路径在事件时经 `findOfficialService`（`engine/backend.js`）按 `compactionMode`（`realm` 先试 `agent.ctx` 再试 `ctx`；`global` 只试 `ctx`）定位。
   - **内置引擎**——`src/engine/builtin.js` 自实现的完整压缩事务，只依赖 `ctx.sessions.append`、`ctx.llm.stream`、`ctx.tokenMeter.estimateMessage`（全部经 `ctx.get` 读取、可缺省、对 `undefined` 做守卫）。它追加**官方命名的 `compaction/*` 事件**（`compaction/start`、`compaction/summary`、`compaction/end`）与 `user/message`(replace)——**复用**官方词汇而非私造 `fc-compact/*`，因为官方类型天生在 `KNOWN_SESSION_EVENT_TYPES` 编目内，重载无需 `ignorable` 标记即可跨 build 持久（详见上文"为什么内置引擎改用官方 `compaction/*` 词汇"一节）。代价是须满足官方全局 `compaction/invariant` 监听器的全部不变量（共享 `compactionId`、owner/turn 一致、`shadowedSeqs` 对齐 `shadowedRange`、`provider`/`model` 必填、无错 `end` 需紧跟 `summary`）。两引擎并存时优先级：官方可达即用官方；官方不可达才落到内置（`builtinEnabled !== false` 且 `agent.session` / `llm.service/stream` 可用）。
