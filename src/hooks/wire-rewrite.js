@@ -1,10 +1,11 @@
 /**
  * dsh-force-compact's Live-UI watermark side-channel on the `llm/stream`
  * waterfall seam — KICKS OFF a fresh random "working" one-liner on every LLM
- * call START so the Live UI (browser) repaints the `TurnStatus` node with a
- * new `liveUi.working` pair. Purely a PRESENTATION-LAYER concern (a settings-
- * write on the `liveUi` field, mirrored live to the browser via the existing
- * settings-sync channel). Performs NO wire modification whatsoever.
+ * call START so the Live UI (browser) replaces the official running label's
+ * leading phrase with a new `liveUi.working` status. Purely a PRESENTATION-LAYER
+ * concern (a settings-write on the `liveUi` field, mirrored live to the browser
+ * via the existing settings-sync channel). Performs NO wire modification
+ * whatsoever.
  *
  * Why NOT at the `llm/stream` seam for wire-fields (historical note, 2026-08)
  * ----------------------------------------------------------------------------
@@ -69,7 +70,7 @@
  * point so the Live UI paints a fresh random "working" one-liner on every LLM
  * call start. This is purely a presentation-layer concern (a settings-write
  * on the `liveUi` field, mirrored live to the browser so it can repaint the
- * `TurnStatus` node) and MUST NOT BLOCK the return path. `publishRandomWorking`
+ * official running label) and MUST NOT BLOCK the return path. `publishRandomWorking`
  * swallows ALL of its own rejections internally, so the fire-and-forget form
  * leaks no unhandled rejection and never disturbs the stream.
  *
@@ -143,7 +144,7 @@ export function registerLlmStreamHook(ctx) {
     // `payload` is the deep-frozen GenerateOptions seed — NEVER mutated (see
     // the historical-note section in the module header); the publication
     // touches none of that (pure settings-write on the `liveUi` field,
-    // mirrored live to the browser so it can repaint the `TurnStatus` node).
+    // mirrored live to the browser so it can repaint the official running label).
     // `void payload` documents the deliberate non-use.
     ctx.on('llm/stream', (payload, next) => {
       void payload

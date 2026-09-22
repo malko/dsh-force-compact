@@ -113,17 +113,32 @@ thinking there, and business calls (which omit it) keep thinking.
 
 ### LiveUI status
 
-A tiny host→client messenger (the `liveUi` settings field mirrored live to the browser) pins a
-badge beside the turn:
+A tiny host→client messenger (the `liveUi` settings field mirrored live to the browser) replaces the
+official running label's leading phrase beside the turn. Only the text changes: the harness's own
+elapsed-time text, font, and colour are left exactly as shipped.
 
-- **Red "compressing"** — just before a compaction commits;
-- **Green "done"** — the instant a compaction lands; 3 s later a fresh random working line
+- **`[强制压缩中>>>]`** — just before a compaction commits;
+- **`[压缩完成!]`** — the instant a compaction lands; 3 s later a fresh random working line
   takes over;
-- **Blue "working"** — otherwise a rotating playful one-liner;
-- **Cleared at conversation end** — when the agent goes `idle` (the turn is fully
-  done), an empty text (isImportant) is pushed: the badge text is wiped and the
-  phase color removed, restoring the official look. Replaces the former
-  conversation-START forced working-pair override (removed 2026-09).
+- **a rotating playful one-liner** — otherwise, on every model request;
+- **Restored at conversation end** — when the agent goes `idle` (the turn is fully
+  done), an empty text (isImportant) is pushed: the client puts the official label back
+  and drops its replacement prefix. Replaces the former conversation-START forced
+  working override (removed 2026-09).
+
+Harness 0.1.7 renders that label as a single interpolated string (`深度求索中，用时1分14秒` /
+`Deep diving for 1m 14s`) inside `button[data-turn-process] > span`, rewritten once per second while
+the turn runs; the `role="status"` node is now a visually-hidden screen-reader announcement only. So
+the client half substitutes **just the leading phrase**: it uses the announcement node's text as an
+anchor, splits the visible label at their common prefix, and keeps the remainder — the harness clock,
+connector included — verbatim. The announcement node is never touched, so screen readers keep the
+official text. A `MutationObserver`, connected only while a phase is active, re-applies the prefix in
+the same microtask in which React rewrites the label, so the clock keeps ticking and nothing polls.
+
+Label text follows the app language: the host writes a locale-independent `textId` (the phase name or
+`working.N`) plus the canonical Chinese text, and the client half resolves it through its own
+`ctx.locale` zh/en/ja/ko dictionaries — an English UI shows English one-liners, a Chinese UI keeps the
+originals.
 
 Badge text follows the app language: the host writes a locale-independent `textId`
 (phase name or `working.N`) alongside the canonical text, and the client half maps
@@ -295,11 +310,12 @@ predictably onto the UI figure.
 *Settings page — the **Force Compact** section; all nine fields above are editable live
 without a restart.*
 
-![Conversation page — red "compressing" badge pinned beside an in-flight turn](assets/live-conversation.png)
+![Conversation page — the working line replacing the official label's leading phrase](assets/live-conversation.png)
 
-*Conversation page — the LiveUI signal paints three states (red: compressing / green: done /
-blue: working); the green banner fades after about 3 s back to a random working line; at
-conversation end the badge is cleared (empty text) back to the official look.*
+*Conversation page — the LiveUI signal rewrites the leading phrase of each running turn's label
+(compressing / done / a rotating working line) while the harness clock keeps ticking after it; at
+conversation end the official label is restored. The screenshot predates the 2026-09 colour removal:
+the badge is now plain grey text in the official font.*
 
 ---
 

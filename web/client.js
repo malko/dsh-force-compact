@@ -766,78 +766,185 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 「Deep diving…」指示器的实时贴皮器（live UI 徽章）。
-     *
-     * 宿主半部（core/ui-signal.js）在四个时机改写本命名空间的 liveUi 字段：
-     *   • 每次出站 LLM 调用开始时——写入 20×20 随机工作态（phase/text/textId/color）；
-     *   • 任意一次强制压缩开始前——固定红色「[强制压缩中>>>]」；
-     *   • 压缩成功后——固定绿色「[压缩完成!]」；
-     *   • 会话结束时（agent 转入 idle，hooks/idle.js）——空字符串 text
-     *     （isImportant）：语义是"清空"——抹掉徽章文字、撤掉相位 class，
-     *     徽章回到官方外观（取代 2026-09 前"会话开始时强制重绘随机工作态"）。
-     * 文本按 textId 经下方词典做 zh/en 本地化（跟随应用语言），见 paintTurnStatus。
-     * 本函数把该字段的最新值贴到对话区那个 `<div role="status" aria-live="polite">`
-     * （官方 `TurnStatus` 组件，"Deep diving…" 所在处）的**第一个文本节点**上，
-     * 并按 phase 着色。这是一次**瞬时 DOM 覆盖**：React 的下一帧重绘会自行还原
-     * （这正是文档 turn-status-deep-diving-rendering.md §四「临时改文案」描述的
-     * 机制），而下一轮 liveUi 变化又会再次贴上来——净效果就是跟随宿主相位持续
-     * 显示,无需本地 timer、也无需 MutationObserver 追帧：宿主每次改写都经由
-     * configForms 镜像到达这里,天然成为我们的"事件时钟"。
-     *
-     * 定位策略：全页面可能存在多个 role=status 节点（多标签/多会话并存时,每个
-     * 打开的 running 会话各有一个 TurnStatus）。我们取**全部**命中的节点逐一贴
-     * 上——装饰性的、幂等的、零侵入（不改 className/结构,只动第一个文本子节点
-     * 的 nodeValue + 父节点的相位标记属性）。找不到节点则静默 no-op（当前没有
-     * running 会话 → 没有指示器 → 无可贴目标,这是预期行为而非错误）。
-     *
-     * 着色原理：官方 `TurnStatus` 的可见颜色来自 shimmer——
-     * `background: linear-gradient` + `background-clip:text` +
-     * `color/-webkit-text-fill-color: transparent`（ChatView.module.css
-     * .turnStatus）。因此 **inline `style.color` 对它无效**（填充恒为透明,
-     * 看到的是背景渐变,不是 color）。唯一可行的覆盖方式是一条高于普通类规则
-     * 的选择器（`[role="status"][data-fc-phase]` + `!important`）同时中和四个
-     * 属性：`background:none`（撤掉渐变本体）+ `animation:none`（停掉扫光,
-     * prefers-reduced-motion 分支下两者皆静态,一并覆盖）+ `color` /
-     * `-webkit-text-fill-color` 设为相位色。样式表经 ensurePhaseStyleSheet
-     * 按需注入**一次**（head 下首个 <style>,key 前缀 `dsh-fc-` 保证重复插入
-     * 时浏览器按内容复用而不产生重复规则）。选择器以 `data-fc-phase="<phase>"`
-     * 精确匹配相位值（非存在性通配）,使不同相位的多个 status 节点各自命中各自
-     * 的规则、互不干扰；phase 消失（React 重建节点、新 TurnStatus 挂载）后
-     * 属性不复存在 → 规则不再命中 → 官方 shimmer 自然恢复。
-     *
-     * @param liveUi - 宿主写入的 { phase, text, textId, color }；缺省/null 时 no-op；
-     *   `text` 为空字符串时执行"清空"（抹掉所贴文本 + 撤相位 class/属性）。
-     *   文本本地化：`textId` 是语言无关鉴别符（phase 或 'working.N'），经 t() 的
-     *   zh/en 词典映射成语种文本；textId 缺失/无 t/解析失败时回落到规范中文 text。
+     * Live UI 徽章的贴皮入口。宿主半部（core/ui-signal.js）在四个时机改写本
+     * 命名空间的 liveUi 字段：每次出站 LLM 调用开始时写入随机工作态；强制压缩
+     * 开始前写入固定「[强制压缩中>>>]」；压缩成功后写入固定「[压缩完成!]」；
+     * 会话结束（agent 转入 idle，hooks/idle.js）写入空字符串 text —— 语义是
+     * "清空"（还原官方原文、断开观察器）。
+     * 文本按 textId 经下方词典做 zh/en/ja/ko 本地化（跟随应用语言）。
+     * 机制与 DOM 定位策略见下方「官方运行标签的前缀替换器」注释块。
      */
-    // ── 扫光配色表：20 个工作态颜色 + 2 个钉住颜色（compressing 红 / done 绿）──
-    // 每条对应 web/swish.css 里的 .falling-ts-swish-NN（@keyframes falling-ts-swish-NN），
-    // 色值单一事实源在 src/core/ui-signal.js 的 WORKING_COLORS（20 项）与
-    // PINNED_COLORS（2 项），此处仅做"hex → 编号"映射，不做任何样式计算。
-    // 2026 深色化第二轮：与 src/core/ui-signal.js 的 WORKING_COLORS（20 项）
-    // + PINNED_COLORS（2 项：compressing 暗红 / done 暗绿）逐字对应，
-    // 索引 0..19 = 工作态，20 = compressing，21 = done。
-    const SWISH_HEXES = [
-      "#1e40af","#1e3a8a","#312e81","#4c1d95","#581c87",
-      "#8318a3","#86198f","#9d174d","#9f1239","#991b1b",
-      "#9a3412","#92400e","#854d0e","#4d7c0f","#3f6212",
-      "#166534","#065f46","#0e7490","#155e75","#172554",
-      "#9b1c2b","#2f6f52",
-    ];
-    const SWISH_CLASS_PREFIX = "falling-ts-swish-";
-    function swishClassForColor(hex) {
-      const norm = String(hex || "").trim().toLowerCase();
-      const idx = SWISH_HEXES.findIndex(c => c.toLowerCase() === norm);
-      // 未识别色 → 回落到第一档（最冷蓝），避免误贴错误相位色
-      const slot = idx >= 0 ? idx : 0;
-      return SWISH_CLASS_PREFIX + String(slot).padStart(2, "0");
+    // ── 官方运行标签的「前缀替换器」──
+    // harness 0.1.7 起，那句 running 文案是一个插值字符串
+    // （`深度求索中，用时1分14秒` = t('message.turnProcess.deepDivingFor', { duration })），
+    // 由 TurnProcessNodeView 每秒重渲染一次；而 `[role="status"]` 节点已变成 1px
+    // 裁剪的**读屏专用播报**节点（accessibility.module.css .visuallyHidden），
+    // 不再是可见文案的载体。因此本插件只做三件事：
+    //   • 替换**可见标签**（button[data-turn-process] > span）里「深度求索中」
+    //     这一段前缀，**保留 harness 自己的计时文本**（`，用时1分14秒`）；
+    //   • 不写颜色、不动字体——官方 tertiary 灰与字号逐字不变；
+    //   • 绝不触碰 role=status 播报节点（无障碍播报归还官方）。
+    //
+    // 计时文本的切分不硬编码任何中英文：运行态下「可见标签 = 官方播报文本 + 计时」，
+    // 故取同级 role=status 节点的文本与标签的**公共前缀**为锚——公共前缀之后就是
+    // harness 的计时（中英皆然：`深度求索中` + `，用时1分14秒`、`Deep diving` +
+    // ` for 1m 14s`）；公共前缀为空（如回合结束后的「用时 2分5秒」「Took 2m 5s」）
+    // ⇒ 已不是运行态，直接不贴，官方原文原样留着。
+    //
+    // 为什么需要 MutationObserver：标签每秒被 React 重写一次（时长在跳），一次性
+    // 覆盖会在 1 秒内被抹掉。观察器在 React 写入的同一微任务里重新贴上，浏览器不会
+    // 画出中间态；本插件自己的写入由 `painted` 值短路，不会自激。观察器只在**有活跃
+    // 相位**期间连接（清空即断开），空闲时零开销、零轮询。
+    //
+    // 必须改文本节点的 nodeValue，不能写 textContent——后者会换掉 React 持有的那个
+    // 文本节点，官方计时将再也更新不上来。
+
+    /** 可见运行标签：button 带稳定属性 data-turn-process，其 span 即文案载体。 */
+    const TURN_LABEL_SELECTOR = "button[data-turn-process] > span";
+
+    /** 当前要替换进去的前缀；null = 不替换（清空态）。 */
+    let desiredPrefix = null;
+
+    /** 已改写的标签 → { painted, suffix, official }（清空时据此还原官方原文）。 */
+    const paintedLabels = new Map();
+
+    /** 活跃相位期间的 DOM 观察器；清空 / 插件卸载即断开。 */
+    let labelObserver = null;
+
+    /**
+     * 取标签内的文本节点。
+     * @param {Element} label 可见标签 span。
+     * @returns {CharacterData|null} 文本节点（无则 null）。
+     */
+    function labelTextNode(label) {
+      for (const child of label.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) return child;
+      }
+      return null;
     }
-    // 每个 status 节点上次被贴过的文本子节点（node → textChild）。清空
-    // （text → ""）之后该子节点变空，"第一个非空文本子节点"搜索再也找不到
-    // 它——WeakMap 让锚点在清空后依然存活：下一轮推送直接命中被清空的旧节点
-    // 重新贴字；React 重建节点（新 element → Map 未命中）时回落到搜索、重新
-    // 捕获 React 的新文本节点。
-    const paintedTextChild = new WeakMap();
+
+    /**
+     * 同级 role=status 播报节点的文本——运行态即官方「深度求索中」原文。
+     * @param {Element} label 可见标签 span。
+     * @returns {string} 播报文本（结构变化时为空串）。
+     */
+    function announcementOf(label) {
+      const button = label.parentElement;
+      const scope = button === null ? null : button.parentElement;
+      if (scope === null) return "";
+      const status = scope.querySelector('[role="status"][aria-live="polite"]');
+      return status === null ? "" : status.textContent;
+    }
+
+    /**
+     * 两个字符串的公共前缀长度。
+     * @param {string} left 左串。
+     * @param {string} right 右串。
+     * @returns {number} 公共前缀字符数。
+     */
+    function commonPrefixLength(left, right) {
+      const limit = Math.min(left.length, right.length);
+      let index = 0;
+      while (index < limit && left[index] === right[index]) index += 1;
+      return index;
+    }
+
+    /**
+     * 官方文本里属于 harness 计时的那一段。
+     * @param {Element} label 可见标签 span。
+     * @param {string} official 标签当前的官方原文。
+     * @returns {string|null} 计时尾巴；null = 不是运行态（不贴）。
+     */
+    function timeSuffixOf(label, official) {
+      const announcement = announcementOf(label);
+      if (announcement.length === 0) return null;
+      const anchor = commonPrefixLength(announcement, official);
+      return anchor === 0 ? null : official.slice(anchor);
+    }
+
+    /**
+     * 把一个标签贴成 desiredPrefix + 官方计时文本。
+     * @param {Element} label 可见标签 span。
+     * @returns {void}
+     */
+    function paintLabel(label) {
+      const node = labelTextNode(label);
+      if (node === null) return;
+      const current = node.nodeValue;
+      const state = paintedLabels.get(label);
+      if (state !== undefined && current === state.painted) {
+        // 本插件上一轮的文本还在（React 尚未重写）：只需跟上相位文案的变化。
+        const next = desiredPrefix + state.suffix;
+        if (next !== state.painted) {
+          state.painted = next;
+          node.nodeValue = next;
+        }
+        return;
+      }
+      const suffix = timeSuffixOf(label, current);
+      if (suffix === null) { paintedLabels.delete(label); return; } // 非运行态：官方原文不动
+      const painted = desiredPrefix + suffix;
+      paintedLabels.set(label, { painted, suffix, official: current });
+      if (current !== painted) node.nodeValue = painted;
+    }
+
+    /** 贴全部打开的会话 / 标签页里命中的运行标签（装饰性、幂等）。 */
+    function paintAllTurnLabels() {
+      if (desiredPrefix === null) return;
+      for (const label of document.querySelectorAll(TURN_LABEL_SELECTOR)) paintLabel(label);
+    }
+
+    /**
+     * 这批 DOM 变更是否可能动到运行标签（流式输出时避免无谓的全量重扫）。
+     * @param {MutationRecord[]} records 观察器回调的变更批次。
+     * @returns {boolean} 是否需要重贴。
+     */
+    function touchesTurnLabel(records) {
+      for (const record of records) {
+        if (record.type === "characterData") {
+          const parent = record.target.parentElement;
+          if (parent !== null && parent !== undefined && parent.matches(TURN_LABEL_SELECTOR)) return true;
+          continue;
+        }
+        for (const added of record.addedNodes) {
+          if (added.nodeType !== Node.ELEMENT_NODE) continue;
+          if (added.matches(TURN_LABEL_SELECTOR) || added.querySelector(TURN_LABEL_SELECTOR) !== null) return true;
+        }
+      }
+      return false;
+    }
+
+    /** 确保观察器已连接（幂等，至多一个）。 */
+    function ensureLabelObserver() {
+      if (labelObserver !== null || typeof MutationObserver !== "function") return;
+      if (document.body === null) return;
+      labelObserver = new MutationObserver((records) => {
+        if (desiredPrefix === null) return;
+        if (!touchesTurnLabel(records)) return;
+        paintAllTurnLabels();
+      });
+      labelObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+    }
+
+    /** 断开观察器（清空态 / 插件卸载）。 */
+    function releaseLabelObserver() {
+      if (labelObserver === null) return;
+      labelObserver.disconnect();
+      labelObserver = null;
+    }
+
+    /** 清空：断开观察器，并把贴过的标签还原成官方原文。 */
+    function clearPaintedLabels() {
+      releaseLabelObserver();
+      for (const [label, state] of paintedLabels) {
+        if (!label.isConnected) continue;
+        const node = labelTextNode(label);
+        if (node === null) continue;
+        if (node.nodeValue === state.painted) node.nodeValue = state.official;
+      }
+      paintedLabels.clear();
+    }
+
     // 把宿主写下的语言无关 textId 映射到本 NS 的词典键。相位猜成语同名键
     // （compressing/done/end → badgeCompressing/badgeDone/badgeEnd），工作态
     // 'working.N' → badgeWorkingN（0..19，与 src/core/ui-signal.js 的
@@ -852,7 +959,8 @@ window.__ModuleLoader__.load({
       }
       return null;
     }
-    // 徽章显示文本：优先按 textId 经 t() 取当前语种词典的译文；t 缺失 / textId
+
+    // 显示文本：优先按 textId 经 t() 取当前语种词典的译文；t 缺失 / textId
     // 缺失 / 键未解析（t 返回键名自身）时回落到宿主规范中文 text。空串就是"清空"。
     function resolvedText(liveUi, t) {
       const key = textIdToKey(typeof liveUi.textId === "string" ? liveUi.textId : "");
@@ -860,90 +968,30 @@ window.__ModuleLoader__.load({
       const localized = t(key);
       return (typeof localized === "string" && localized !== key) ? localized : liveUi.text;
     }
+
+    /**
+     * 把最新 liveUi 贴成官方运行标签的替换前缀（机制见上方说明）。
+     * @param {object} liveUi 宿主写入的 { phase, text, textId }。
+     * @param {Function} t 本插件命名空间的 t 席位（badge* 词典）。
+     * @returns {void}
+     */
     function paintTurnStatus(liveUi, t) {
       if (typeof document === "undefined") return;
       if (!liveUi || typeof liveUi.text !== "string") return;
-      // 空 text = "清空"（会话结束推送，hooks/idle.js → ui-signal publishEnd）：
-      // 抹掉徽章文字并撤掉相位 class/属性，徽章回到官方外观。
       let display = resolvedText(liveUi, t);
       // 会话结束清空是承载不变量：end 相位的语义就是"清空"，必须无条件触发，
-      // 不能经本地化判断——若将来 badgeEnd 被译成非空字符串，徽章也会被清空，
-      // 而非残留一段"孤儿文字"挂在官方样式上。
+      // 不能经本地化判断——若将来 badgeEnd 被译成非空字符串，也必须还原官方原文。
       if (display.length !== 0 && (liveUi.text === "" || liveUi.textId === "end")) {
         display = "";
       }
-      const color = display.length === 0 ? null : (typeof liveUi.color === "string" && liveUi.color !== "" ? liveUi.color : null);
-      const nodes = document.querySelectorAll('[role="status"][aria-live="polite"]');
-      if (nodes.length === 0) return; // 没有 running 会话 → 没有 TurnStatus
-      const targetCls = color !== null ? swishClassForColor(color) : null;
-      for (const node of nodes) {
-        let textChild = paintedTextChild.get(node) || null;
-        // 校验记忆的锚点仍是本节点下存活的文本子节点（React 重渲染后可能已
-        // 被换掉/摘下），失配则回落到"第一个非空文本子节点"搜索。
-        if (textChild !== null && (textChild.nodeType !== Node.TEXT_NODE || textChild.parentNode !== node)) textChild = null;
-        if (textChild === null) {
-          for (const child of node.childNodes) {
-            if (child.nodeType === Node.TEXT_NODE && child.nodeValue.trim() !== "") { textChild = child; break; }
-          }
-          if (textChild === null) continue;
-        }
-        textChild.nodeValue = display; // "" → 清空徽章文字
-        paintedTextChild.set(node, textChild);
-        // class 化：先清掉所有上一轮的 swish class，再贴本次（target 为空时只清不加）。
-        for (const cls of [...node.classList]) {
-          if (cls.startsWith(SWISH_CLASS_PREFIX)) node.classList.remove(cls);
-        }
-        // 相位色载体属性：与 swish class 同步贴/撤（`data-fc-bg` 仅在有相位色时
-        // 存在，供 CSS 里的文本强调规则取色；属性消失时强调规则失配、自然回落
-        // 官方 caption 灰）。
-        if (color !== null) {
-          node.setAttribute("data-fc-bg", color);
-        } else {
-          node.removeAttribute("data-fc-bg");
-        }
-        if (targetCls) node.classList.add(targetCls);
+      if (display.length === 0) {
+        desiredPrefix = null;
+        clearPaintedLabels();
+        return;
       }
-    }
-
-    /**
-     * 把 web/swish.css 的全部内容内联注入到 <head>（一次性，幂等）。
-     *
-     * 为什么走内联而不是 <link>：宿主 registry 只暴露已知 artifact（client.js 等），
-     * 插件新增的同名 .css 不会出现在 /plugins/<id>/ 下（实测 404），也没有别的
-     * 合法入口把静态 CSS 资产带进 DOM。plain-JS 插件无构建步骤的约束决定了唯一
-     * 可行路径就是把 CSS 文本直接内联成 <style> 注入。
-     *
-     * 同步纪律：此字符串必须与仓库内的 web/swish.css **语义一致**——后者是给人读的
-     * 可读版本（带注释、格式化），前者是给浏览器执行的紧凑版本；两者不是逐字镜像。
-     * 改动任意一边都要同步另一边。审查 checklist：
-     *   ① 22 段 @keyframes + 22 个 class + 1 段文本强调规则，数量逐一对得上；
-     *   ② 所有 var() 引用、渐变色值、selector 逐字一致；
-     *   ③ 每段规则都带 !important。
-     * 扫光渐变骨架为**相位色底**（<HEX> 0%/40%/60%/100% 四点全相位色），
-      * 中央 50% 是**白色扫光带**（var(--dsw-fc-swish-band, #ffffff)）——与官方
-      * .turnStatus 的"深色底 + 浅色扫光带"机制同构（官方：deepseek-500 底 +
-      * deepseek-200 带），文字填充（-webkit-background-clip:text 继承自官方哈希类）
-      * 即相位色本体，不再是白底上一条窄色缝（旧形态为品牌蓝
-      * --dsw-static-deepseek-500 白底 + 50% 窄色缝，2026 版已废弃）。
-     * 
-     * 文本强调：.turnStatusClock（TurnStatus 唯一独立着色的子元素——时长数字，官方
-     * 用灰色别名 --dsw-alias-label-caption 着色）随 data-fc-bg 属性取当前相位色；
-     * 该属性仅在有相位色时存在（paintTurnStatus 同步贴/撤），属性消失时选择器失配、
-     * 官方 caption 灰自然恢复。详见 web/swish.css 头注释与「文本颜色强调」节。
-     */
-    const SWISH_CSS = "@keyframes falling-ts-swish-00{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-00{animation-name:falling-ts-swish-00!important;background-image:linear-gradient(90deg,#1e40af 0%,#1e40af 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#1e40af 60%,#1e40af 100%)!important}@keyframes falling-ts-swish-01{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-01{animation-name:falling-ts-swish-01!important;background-image:linear-gradient(90deg,#1e3a8a 0%,#1e3a8a 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#1e3a8a 60%,#1e3a8a 100%)!important}@keyframes falling-ts-swish-02{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-02{animation-name:falling-ts-swish-02!important;background-image:linear-gradient(90deg,#312e81 0%,#312e81 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#312e81 60%,#312e81 100%)!important}@keyframes falling-ts-swish-03{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-03{animation-name:falling-ts-swish-03!important;background-image:linear-gradient(90deg,#4c1d95 0%,#4c1d95 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#4c1d95 60%,#4c1d95 100%)!important}@keyframes falling-ts-swish-04{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-04{animation-name:falling-ts-swish-04!important;background-image:linear-gradient(90deg,#581c87 0%,#581c87 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#581c87 60%,#581c87 100%)!important}@keyframes falling-ts-swish-05{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-05{animation-name:falling-ts-swish-05!important;background-image:linear-gradient(90deg,#8318a3 0%,#8318a3 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#8318a3 60%,#8318a3 100%)!important}@keyframes falling-ts-swish-06{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-06{animation-name:falling-ts-swish-06!important;background-image:linear-gradient(90deg,#86198f 0%,#86198f 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#86198f 60%,#86198f 100%)!important}@keyframes falling-ts-swish-07{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-07{animation-name:falling-ts-swish-07!important;background-image:linear-gradient(90deg,#9d174d 0%,#9d174d 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#9d174d 60%,#9d174d 100%)!important}@keyframes falling-ts-swish-08{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-08{animation-name:falling-ts-swish-08!important;background-image:linear-gradient(90deg,#9f1239 0%,#9f1239 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#9f1239 60%,#9f1239 100%)!important}@keyframes falling-ts-swish-09{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-09{animation-name:falling-ts-swish-09!important;background-image:linear-gradient(90deg,#991b1b 0%,#991b1b 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#991b1b 60%,#991b1b 100%)!important}@keyframes falling-ts-swish-10{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-10{animation-name:falling-ts-swish-10!important;background-image:linear-gradient(90deg,#9a3412 0%,#9a3412 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#9a3412 60%,#9a3412 100%)!important}@keyframes falling-ts-swish-11{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-11{animation-name:falling-ts-swish-11!important;background-image:linear-gradient(90deg,#92400e 0%,#92400e 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#92400e 60%,#92400e 100%)!important}@keyframes falling-ts-swish-12{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-12{animation-name:falling-ts-swish-12!important;background-image:linear-gradient(90deg,#854d0e 0%,#854d0e 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#854d0e 60%,#854d0e 100%)!important}@keyframes falling-ts-swish-13{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-13{animation-name:falling-ts-swish-13!important;background-image:linear-gradient(90deg,#4d7c0f 0%,#4d7c0f 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#4d7c0f 60%,#4d7c0f 100%)!important}@keyframes falling-ts-swish-14{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-14{animation-name:falling-ts-swish-14!important;background-image:linear-gradient(90deg,#3f6212 0%,#3f6212 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#3f6212 60%,#3f6212 100%)!important}@keyframes falling-ts-swish-15{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-15{animation-name:falling-ts-swish-15!important;background-image:linear-gradient(90deg,#166534 0%,#166534 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#166534 60%,#166534 100%)!important}@keyframes falling-ts-swish-16{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-16{animation-name:falling-ts-swish-16!important;background-image:linear-gradient(90deg,#065f46 0%,#065f46 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#065f46 60%,#065f46 100%)!important}@keyframes falling-ts-swish-17{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-17{animation-name:falling-ts-swish-17!important;background-image:linear-gradient(90deg,#0e7490 0%,#0e7490 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#0e7490 60%,#0e7490 100%)!important}@keyframes falling-ts-swish-18{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-18{animation-name:falling-ts-swish-18!important;background-image:linear-gradient(90deg,#155e75 0%,#155e75 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#155e75 60%,#155e75 100%)!important}@keyframes falling-ts-swish-19{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-19{animation-name:falling-ts-swish-19!important;background-image:linear-gradient(90deg,#172554 0%,#172554 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#172554 60%,#172554 100%)!important}@keyframes falling-ts-swish-20{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-20{animation-name:falling-ts-swish-20!important;background-image:linear-gradient(90deg,#9b1c2b 0%,#9b1c2b 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#9b1c2b 60%,#9b1c2b 100%)!important}@keyframes falling-ts-swish-21{from{background-position:100% 0}to{background-position:0 0}}.falling-ts-swish-21{animation-name:falling-ts-swish-21!important;background-image:linear-gradient(90deg,#2f6f52 0%,#2f6f52 40%,var(--dsw-fc-swish-band,#ffffff) 50%,#2f6f52 60%,#2f6f52 100%)!important}.turnStatus[data-fc-bg] .turnStatusClock,[data-fc-bg] span:last-of-type{color:attr(data-fc-bg)!important;-webkit-text-fill-color:attr(data-fc-bg)!important}";
-
-    /**
-     * 确保 <style id="falling-ts-swish-inline"> 已挂在 <head>（幂等，至多一次）。
-     * @returns void
-     */
-    function ensureSwishStylesheetInlined() {
-      if (typeof document === "undefined") return;
-      if (document.getElementById("falling-ts-swish-inline")) return;
-      const el = document.createElement("style");
-      el.id = "falling-ts-swish-inline";
-      el.textContent = SWISH_CSS;
-      document.head.appendChild(el);
+      desiredPrefix = display;
+      ensureLabelObserver();
+      paintAllTurnLabels();
     }
 
     /**
@@ -1056,8 +1104,8 @@ window.__ModuleLoader__.load({
       // 与旧 settingsScope 同形；status 枚举为 'loading'|'ready'|'unavailable'，set/unset/
       // mutate 现在回答 Promise<boolean>）。
       const scope = ctx.configForms.get(NS_SETTINGS);
-      // 挂载 swish 调色板样式表（首次 apply 时执行一次；effect 登记便于 fiber 卸载时清理）。
-      ctx.effect(() => ensureSwishStylesheetInlined(), "force-compact: swish stylesheets");
+      // 观察器只在有活跃相位期间连接（见 paintTurnStatus）；卸载时兜底断开。
+      ctx.effect(() => releaseLabelObserver, "force-compact: turn-label observer");
       // 主题别名（浅色/暗色两套取值）。注入失败只影响取色、不影响功能。
       ctx.effect(() => ensureThemeTokensInlined(), "force-compact: theme tokens");
       // 把 configForms 镜像成 uSES 安全的 SnapshotStore（hooks 分区的可观察源）。
@@ -1076,11 +1124,11 @@ window.__ModuleLoader__.load({
             d.value = s.value;
             d.writable = s.writable;
           });
-          // ── Live UI 徽章（详见上方 paintTurnStatus 文档）──
-          // 每次命名空间快照翻转（含宿主写入 liveUi 瞬间）,顺路把最新 liveUi
-          // 贴到对话区 TurnStatus DOM 上。这一步搭车在已有 scope.subscribe
-          // 回调上不新增任何订阅机制 / timer / 组件,符合 client 端 AGENTS.md
-          // 红线。幂等纯装饰:贴不上（无 running 会话/无 DOM 锚点）即静默跳过。
+          // ── Live UI 徽章（机制见上方「官方运行标签的前缀替换器」）──
+          // 每次命名空间快照翻转（含宿主写入 liveUi 瞬间），顺路把最新相位文案
+          // 贴成官方运行标签的替换前缀。贴皮这一步搭车在已有 scope.subscribe
+          // 回调上，不新增订阅；每秒重渲染由 turn-label MutationObserver 兜住
+          // （仅活跃相位期间连接，清空即断开）。幂等纯装饰：无运行标签即静默跳过。
           const liveUi = (typeof s.value === "object" && s.value !== null) ? s.value.liveUi : undefined;
           if (s.status === "ready" && typeof liveUi === "object" && liveUi !== null) {
            paintTurnStatus(liveUi, t);

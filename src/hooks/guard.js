@@ -39,7 +39,7 @@ import {
   validateSurfaceRegionSafe,
 } from '../engine/region.js'
 import { resolveCompaction } from '../engine/backend.js'
-import { publishCompressing, publishDone, publishUiStatus, randomWorkingPair, PHASE_COMPRESSING, LIVE_UI_FIELD } from '../core/ui-signal.js'
+import { publishCompressing, publishDone, publishUiStatus, randomWorkingStatus, PHASE_COMPRESSING, LIVE_UI_FIELD } from '../core/ui-signal.js'
 import { isCompactionActive } from '../engine/builtin.js'
 import { guardFn, renderCrash, captureThrowSite, appendCrashLine as appendDiag } from '../core/crashnet.js'
 import { getProjectedTokens } from '../core/projected.js'
@@ -399,7 +399,7 @@ export async function clearStuckCompressingBanner(ctx, session) {
       ? liveUi.phase
       : undefined
     if (phase !== PHASE_COMPRESSING) return // nothing stuck to clear
-    await publishUiStatus(ctx, randomWorkingPair(), true) // override the stale bracket
+    await publishUiStatus(ctx, randomWorkingStatus(), true) // override the stale bracket
   } catch { /* a UI clear must never disturb the request path */ }
 }
 

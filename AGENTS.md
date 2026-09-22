@@ -6,13 +6,31 @@
 
 集合约定要求插件"纯 Host 监听器：不引入 timer"。本插件在
 `src/core/ui-signal.js` 的 `publishDone` 中存在**一处有意的单用途定时器**
-（`DONE_FALLBACK_MS = 3000` ms）：发布绿色 `[压缩完成!]` DONE 横幅后，3 秒后
-以 `isImportant=true` 强制重绘一对随机 Deep working 文本，把 UI 还原到常规
+（`DONE_FALLBACK_MS = 3000` ms）：发布 `[压缩完成!]` DONE 横幅后，3 秒后
+以 `isImportant=true` 强制重绘一条随机 working 文本，把 UI 还原到常规
 工作中外观。该定时器是纯表现层（fire-and-forget `setTimeout`，无内存态、
 无持久化、不影响任何压缩事务或模型请求），为用户明确要求的 UI 行为，
 **不属于**"引入 timer"所指的计时型副作用（如周期调度 / 延时重试），故予以
 豁免。除此一处之外，本插件仍不引入任何 timer；`queueForceCompact` 的
 process-local `Map` 标记也无 timer。
+
+## 例外：LiveUI 贴皮的 `MutationObserver`（有意偏离"客户端不引入额外订阅"）
+
+集合约定要求 web client 半部"不引入 timer、内存态存储或额外订阅"。`web/client.js` 的
+LiveUI 贴皮存在**一处有意的 DOM 观察器**（`ensureLabelObserver`）：harness 0.1.7 把运行标签
+渲染成**每秒重渲染的插值字符串**，一次性文本替换会在 1 秒内被 React 抹掉，所以需要一个
+"React 一写就重贴"的时机。观察器的性质与 `publishDone` 定时器同类——纯表现层、无持久化、
+不影响任何压缩事务或模型请求，且比定时器更省：
+
+- **不是周期调度**：只在 React 真正改写标签时触发，空闲时零回调；定时器方案会退化成每秒轮询。
+- **只在有活跃相位期间连接**：`paintTurnStatus` 在相位为空（end 清空）时立即 `disconnect`，
+  插件卸载时兜底断开（`ctx.effect(() => releaseLabelObserver, …)`）。
+- **自激被短路**：回调先用 `touchesTurnLabel(records)` 过滤（只认标签自身的 characterData
+  与含标签的 childList），本插件自己的写入再由 `painted` 值比对短路，不产生回环。
+- **内存态有界且可清**：`paintedLabels`（标签 → 贴过的文本 + 官方原文）随清空 `clear()`，
+  体量 = 打开的 running 会话数。
+
+除这一处外，client 半部仍不引入任何 timer、周期订阅或跨会话内存态。
 
 ## 例外：摘要流的硬超时守卫（`AbortSignal.timeout`，2026-08-30 增补）
 
@@ -508,10 +526,24 @@ dsh 安装提供）：`dsh-settings`（Config/表单）、`dsh-compaction`
 只会静默回落到 en（或显示键名）——这正是必须由探针守住的原因。
 
 **LiveUI 徽章**：宿主发出的 `liveUi` 只带语言无关的 `textId`（相位名或 `working.N`）
-加规范中文 `text`；客户端把 `textId` 映射为 `badgeCompacting`/`badgeDone`/`badgeEnd`/
+加规范中文 `text`；客户端把 `textId` 映射为 `badgeCompressing`/`badgeDone`/`badgeEnd`/
 `badgeWorkingN` 后按活动语言取词，仅当 `textId` 缺失/未知时才回落到宿主的中文 `text`。
 `badgeWorking0..19` 的顺序必须与宿主 `src/core/ui-signal.js` 的 `WORKING_TEXTS` 逐位一致
 （客户端 zh 条目会**遮蔽**宿主 text，漂移即改变 zh 用户实际看到的文案）。
+
+**贴皮方式（2026-09-24 改版，随 harness 0.1.7）**：只替换**可见标签**
+（`button[data-turn-process] > span`）的前缀，**保留 harness 自己的计时文本**，不写颜色、
+不改字体；`role="status"` 播报节点绝不触碰（读屏器仍听到官方文案）。切分点是**播报文本与
+可见标签的公共前缀**——运行态下标签 = 播报文本 + 计时（中英皆然：`深度求索中` +
+`，用时1分14秒`、`Deep diving` + ` for 1m 14s`），公共前缀之后即为 harness 的计时
+（含 `，用时` / ` for ` 连接词），原样保留；公共前缀为空（回合已结束，如「用时 2分5秒」）
+则不贴、官方原文留着。这套判据不硬编码任何中英文文案，也不依赖 `.turnStatus` /
+`.turnStatusClock`（0.1.7 已删除这两个类与整套 shimmer）。宿主 `liveUi` **不再携带 `color`**。
+行为由 `node exploration/fc-livetext-prefix-probe.mjs` 守住（提取 `web/client.js` 里的真实
+实现 + 最小 DOM 桩，12 项：中英前缀替换、计时保留、每秒重渲染后重贴、自激短路、清空还原、
+多会话、textId 回退）；`node exploration/fc-livetext-apply-probe.mjs` 另按浏览器
+`window.__ModuleLoader__.load` 契约真装载一次并跑 `apply(ctx)`（8 项：effect 登记、主题表注入、
+无 swish 表、liveUi 推送改写可见标签、播报节点不动、end 还原、观察器 disposer 可调）。
 
 **验证**（两条都必须绿）：
 
@@ -552,7 +584,7 @@ node --import <harness>/node_modules/tsx/dist/esm/index.mjs \
 
 ## 概览
 
-- 插件的持久效果是**追加到会话日志的压缩事务**——具体形态取决于实际走了哪条引擎：走官方时落 `compaction/*` 系列（`compaction/start`、`compaction/summary`、`compaction/end`）加一个 `surfaceOp:replace` 的 `user/message`；走内置时同样落 `compaction/*` 系列（`compaction/start`、`compaction/summary`、`compaction/end`，字段形状与官方完全一致）加同样形态的 `user/message`。两种事务都以"前置括号事件 + 后置 replace 表面节点"的形式落地。除上文"例外"节的单用途定时器（`ui-signal.js` `publishDone`，有意偏离，见该节）外，插件不引入 timer 或内存态存储；Host 半部保持是**核心模型请求缝**（`agent/request` / `agent/pre-step`）与 `session/flush` 上的纯 Host 监听器。**另有一个 web client 半部**（`web/client.js`，`package.json` 的 `exports["./client"]` + `dsh.client.platform: web`，经 client module 系统自动组成，无需改 web-app 组合）：仅注册一个 `settings.section`（设置页左侧菜单"强制压缩 / Force Compact"分区，order 30），经 `ctx.configForms.get('falling-ts-force-compact')` 镜像成 uSES 安全的 `SnapshotStore` 并读写字段（`scope.set`/`scope.unset` 写回 `settings.yaml`），**不**引入 timer、内存态存储或额外订阅；client 半部 `inject: ['slots','locale','configForms']`（这三个 client 服务在 client 启动时即可用，与 Host 侧的 `compaction` 运行时依赖不同）。**liveUi 徽标文字四语**：宿主发出的 `liveUi` 事件携带语言无关的 `textId`（相位名或 `working.N`）+ 规范中文 `text`；badge 显示文本由 client 半部经 `ctx.locale` 的 **zh/en/ja/ko** 词典按 `textId` 本地化（`badgeCompressing`/`badgeDone`/`badgeWorkingN`），跟随应用语言——英文 UI 显示英文俏皮话，日文/韩文 UI 显示对应译文，中文 UI 保持原文；宿主半部无 locale 服务，刻意保持语言无关（textId 缺失/未知时 client 回落到规范中文 `text`）。语言目录项与词典登记见下文"界面文案与语言"节。
+- 插件的持久效果是**追加到会话日志的压缩事务**——具体形态取决于实际走了哪条引擎：走官方时落 `compaction/*` 系列（`compaction/start`、`compaction/summary`、`compaction/end`）加一个 `surfaceOp:replace` 的 `user/message`；走内置时同样落 `compaction/*` 系列（`compaction/start`、`compaction/summary`、`compaction/end`，字段形状与官方完全一致）加同样形态的 `user/message`。两种事务都以"前置括号事件 + 后置 replace 表面节点"的形式落地。除上文"例外"节的单用途定时器（`ui-signal.js` `publishDone`，有意偏离，见该节）外，插件不引入 timer 或内存态存储；Host 半部保持是**核心模型请求缝**（`agent/request` / `agent/pre-step`）与 `session/flush` 上的纯 Host 监听器。**另有一个 web client 半部**（`web/client.js`，`package.json` 的 `exports["./client"]` + `dsh.client.platform: web`，经 client module 系统自动组成，无需改 web-app 组合）：仅注册一个 `settings.section`（设置页左侧菜单"强制压缩 / Force Compact"分区，order 30），经 `ctx.configForms.get('falling-ts-force-compact')` 镜像成 uSES 安全的 `SnapshotStore` 并读写字段（`scope.set`/`scope.unset` 写回 `settings.yaml`），**不**引入 timer、跨会话内存态或周期订阅（唯一的 DOM 观察器见上文「LiveUI 贴皮的 `MutationObserver`」例外）；client 半部 `inject: ['slots','locale','configForms']`（这三个 client 服务在 client 启动时即可用，与 Host 侧的 `compaction` 运行时依赖不同）。**liveUi 徽标文字四语**：宿主发出的 `liveUi` 事件携带语言无关的 `textId`（相位名或 `working.N`）+ 规范中文 `text`；badge 显示文本由 client 半部经 `ctx.locale` 的 **zh/en/ja/ko** 词典按 `textId` 本地化（`badgeCompressing`/`badgeDone`/`badgeWorkingN`），跟随应用语言——英文 UI 显示英文俏皮话，日文/韩文 UI 显示对应译文，中文 UI 保持原文；它只替换官方运行标签的前缀，harness 计时原样保留（详见下文"界面文案与语言"节的贴皮方式）。语言目录项与词典登记见下文"界面文案与语言"节。
 - **两条压缩引擎**（见上文"双引擎架构"节）：
   - **官方引擎**——`compaction` 服务提供的 `compactNow` / `compactRegion`，由 preset 平面（`include:agent-presets:compaction-basic`）挂载，**是运行时可选依赖**：插件**不**声明 `inject`——profile 层条目在进程启动时激活，彼时 preset 平面尚未挂载该服务，硬 `inject` 会导致 `assertEntriesActivated` 启动断言失败；各压缩路径在事件时经 `findOfficialService`（`engine/backend.js`）按 `compactionMode`（`realm` 先试 `agent.ctx` 再试 `ctx`；`global` 只试 `ctx`）定位。
   - **内置引擎**——`src/engine/builtin.js` 自实现的完整压缩事务，只依赖 `ctx.sessions.append`、`ctx.llm.stream`、`ctx.tokenMeter.estimateMessage`（全部经 `ctx.get` 读取、可缺省、对 `undefined` 做守卫）。它追加**官方命名的 `compaction/*` 事件**（`compaction/start`、`compaction/summary`、`compaction/end`）与 `user/message`(replace)——**复用**官方词汇而非私造 `fc-compact/*`，因为官方类型天生在 `KNOWN_SESSION_EVENT_TYPES` 编目内，重载无需 `ignorable` 标记即可跨 build 持久（详见上文"为什么内置引擎改用官方 `compaction/*` 词汇"一节）。代价是须满足官方全局 `compaction/invariant` 监听器的全部不变量（共享 `compactionId`、owner/turn 一致、`shadowedSeqs` 对齐 `shadowedRange`、`provider`/`model` 必填、无错 `end` 需紧跟 `summary`）。两引擎并存时优先级：官方可达即用官方；官方不可达才落到内置（`builtinEnabled !== false` 且 `agent.session` / `llm.service/stream` 可用）。
