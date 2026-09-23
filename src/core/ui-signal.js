@@ -80,36 +80,38 @@ export const PINNED_TEXTS = Object.freeze({
 
 /**
  * The 20 WORKING-phase texts. Deliberately irreverent, meme-flavored one-liners
- * aimed at the agent ITSELF ("我正在憋大招..." / "我在偷渡..." / ...) — the
+ * aimed at the agent ITSELF ("正在憋大招" / "正在偷渡灵感" and friends) — the
  * badge talks about what the agent is supposedly up to in a playful voice
  * instead of dry status verbs. Lengths intentionally exceed the old four-char
  * constraint; the client paints the raw string with no width assumption.
+ * **No trailing dots**: the client appends the harness's own elapsed-time text
+ * directly after the phrase, so an ellipsis would read as "…，用时1分14秒".
  * Canonical zh; index `N` becomes `textId 'working.N'`, which the client half
  * maps to its en/zh dictionaries (`badgeWorking<N>`) so the app-language
  * setting picks the display tongue.
  * @readonly
  */
 export const WORKING_TEXTS = Object.freeze([
-  '正在酝酿骚操作...',
-  '正在憋大招...',
-  '灵感正在路上...',
-  '脑细胞开会中...',
-  '灵魂拷问进行中...',
-  '偷偷翻你底牌...',
-  '量子纠缠计算中...',
-  '假装很忙...',
-  '摸鱼式工作中...',
-  '疯狂敲键盘(精神上)...',
-  '正在缝合上下文...',
-  '正在驯服混沌...',
-  '正在召唤赛博大脑...',
-  '正在翻阅《天机》...',
-  'GPU 正在冒烟...',
-  '正在跟熵值搏斗...',
-  '正在画饼给你吃...',
-  '正在偷渡灵感...',
-  '正在暗中观察...',
-  '马上就好(大概)...',
+  '正在酝酿骚操作',
+  '正在憋大招',
+  '灵感正在路上',
+  '脑细胞开会中',
+  '灵魂拷问进行中',
+  '偷偷翻你底牌',
+  '量子纠缠计算中',
+  '假装很忙',
+  '摸鱼式工作中',
+  '疯狂敲键盘(精神上)',
+  '正在缝合上下文',
+  '正在驯服混沌',
+  '正在召唤赛博大脑',
+  '正在翻阅《天机》',
+  'GPU 正在冒烟',
+  '正在跟熵值搏斗',
+  '正在画饼给你吃',
+  '正在偷渡灵感',
+  '正在暗中观察',
+  '马上就好(大概)',
 ])
 
 /**
